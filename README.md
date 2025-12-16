@@ -1,6 +1,6 @@
 # DKRZ Levante Tape Archive Scripts
 
-Scripts to archive and retrieve data from DKRZ tape storage on Levante using `packems`.
+Scripts to archive and retrieve data from DKRZ tape storage on Levante using [`packems`](https://code.mpimet.mpg.de/projects/esmenv/wiki/Packems).
 
 ## Overview
 
