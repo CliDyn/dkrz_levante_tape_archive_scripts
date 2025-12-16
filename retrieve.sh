@@ -14,9 +14,10 @@
 # Usage:
 #   1. Edit the CONFIGURATION section below
 #   2. Update the #SBATCH --account to your project account
-#   3. Submit with: sbatch retrieve.sh
+#   3. Test with: ./retrieve.sh --dry-run
+#   4. Submit with: sbatch retrieve.sh
 #
-#   Or run interactively (for small jobs):
+#   Or run interactively (for small datasets):
 #     ./retrieve.sh
 #
 # Requirements:
@@ -55,17 +56,25 @@ DIRS="run_19900101-19991231 log scripts"
 
 # Print usage information
 usage() {
-    echo "Retrieve directories from tape storage using packems"
+    echo "Usage: ./retrieve.sh [OPTIONS]"
     echo ""
-    echo "Configuration (edit script to change):"
-    echo "  ARCHIVE_BASE: $ARCHIVE_BASE"
-    echo "  RESTORE_BASE: $RESTORE_BASE"
-    echo "  SCRATCH_BASE: $SCRATCH_BASE"
-    echo "  DIRS:         $DIRS"
+    echo "Retrieve directories from DKRZ tape storage using unpackems."
+    echo "Restores data that was archived with archive.sh."
     echo ""
     echo "Options:"
-    echo "  -h, --help    Show this help message"
-    echo "  -n, --dry-run Show what would be retrieved without doing it"
+    echo "  -h, --help    Show this help message and exit"
+    echo "  -n, --dry-run Preview what would be retrieved without making changes"
+    echo ""
+    echo "Current configuration (edit script to change):"
+    echo "  ARCHIVE_BASE:  $ARCHIVE_BASE"
+    echo "  RESTORE_BASE:  $RESTORE_BASE"
+    echo "  SCRATCH_BASE:  $SCRATCH_BASE"
+    echo "  DIRS:          $DIRS"
+    echo ""
+    echo "Examples:"
+    echo "  ./retrieve.sh --dry-run   # Preview retrieval operation"
+    echo "  ./retrieve.sh             # Run retrieval interactively"
+    echo "  sbatch retrieve.sh        # Submit as batch job"
     exit 0
 }
 

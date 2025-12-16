@@ -14,10 +14,11 @@
 # Usage:
 #   1. Edit the CONFIGURATION section below
 #   2. Update the #SBATCH --account to your project account
-#   3. Submit with: sbatch archive_hist_simulations.sh
+#   3. Test with: ./archive.sh --dry-run
+#   4. Submit with: sbatch archive.sh
 #
-#   Or run interactively (for small jobs):
-#     ./archive_hist_simulations.sh
+#   Or run interactively (for small datasets):
+#     ./archive.sh
 #
 # Requirements:
 #   - packems module available on Levante
@@ -58,17 +59,26 @@ TAR_MAX_GB=110
 
 # Print usage information
 usage() {
-    echo "Archive directories to tape storage using packems"
+    echo "Usage: ./archive.sh [OPTIONS]"
     echo ""
-    echo "Configuration (edit script to change):"
-    echo "  SOURCE_BASE:  $SOURCE_BASE"
-    echo "  DEST_BASE:    $DEST_BASE"
-    echo "  SCRATCH_BASE: $SCRATCH_BASE"
-    echo "  DIRS:         $DIRS"
+    echo "Archive directories to DKRZ tape storage using packems."
+    echo "Bundles many small files into large tar balls for efficient tape storage."
     echo ""
     echo "Options:"
-    echo "  -h, --help    Show this help message"
-    echo "  -n, --dry-run Show what would be archived without doing it"
+    echo "  -h, --help    Show this help message and exit"
+    echo "  -n, --dry-run Preview what would be archived without making changes"
+    echo ""
+    echo "Current configuration (edit script to change):"
+    echo "  SOURCE_BASE:   $SOURCE_BASE"
+    echo "  DEST_BASE:     $DEST_BASE"
+    echo "  SCRATCH_BASE:  $SCRATCH_BASE"
+    echo "  DIRS:          $DIRS"
+    echo "  TAR_TARGET_GB: $TAR_TARGET_GB"
+    echo ""
+    echo "Examples:"
+    echo "  ./archive.sh --dry-run   # Preview archive operation"
+    echo "  ./archive.sh             # Run archive interactively"
+    echo "  sbatch archive.sh        # Submit as batch job"
     exit 0
 }
 
