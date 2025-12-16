@@ -48,7 +48,8 @@ DEST_BASE="/arch/${PROJECT}/${USERNAME}/my_experiment"
 # Scratch directory for staging tar balls
 SCRATCH_BASE="/scratch/${USERNAME:0:1}/${USERNAME}/packems_staging"
 
-# Subdirectories to archive (space-separated)
+# Subdirectories to archive (optional, space-separated)
+# Leave empty to archive the entire SOURCE_BASE directory
 DIRS="outdata restart log"
 ```
 

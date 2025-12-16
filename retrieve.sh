@@ -47,8 +47,9 @@ RESTORE_BASE="/work/${PROJECT}/${USERNAME}/runtime/awiesm3-develop/SPIN2_restore
 # Scratch directory where tar balls are staged
 SCRATCH_BASE="/scratch/${USERNAME:0:1}/${USERNAME}/packems_staging"
 
-# Space-separated list of subdirectories to retrieve
-DIRS="run_19900101-19991231 log scripts"
+# Space-separated list of subdirectories to retrieve (optional)
+# Leave empty to retrieve the entire archived directory
+DIRS=""
 
 # =============================================================================
 # END OF CONFIGURATION
@@ -69,7 +70,11 @@ usage() {
     echo "  ARCHIVE_BASE:  $ARCHIVE_BASE"
     echo "  RESTORE_BASE:  $RESTORE_BASE"
     echo "  SCRATCH_BASE:  $SCRATCH_BASE"
-    echo "  DIRS:          $DIRS"
+    if [ -n "$DIRS" ]; then
+        echo "  DIRS:          $DIRS"
+    else
+        echo "  DIRS:          (entire archive)"
+    fi
     echo ""
     echo "Examples:"
     echo "  ./retrieve.sh --dry-run   # Preview retrieval operation"
@@ -112,7 +117,11 @@ echo "Configuration:"
 echo "  Archive:     $ARCHIVE_BASE"
 echo "  Restore to:  $RESTORE_BASE"
 echo "  Staging:     $SCRATCH_BASE"
-echo "  Directories: $DIRS"
+if [ -n "$DIRS" ]; then
+    echo "  Directories: $DIRS"
+else
+    echo "  Directories: (entire archive)"
+fi
 echo ""
 
 # Create restore directory
@@ -120,14 +129,16 @@ if [ "$DRY_RUN" = false ]; then
     mkdir -p "$RESTORE_BASE"
 fi
 
-for dir in $DIRS; do
-    PACK_SOURCE="${SCRATCH_BASE}/${dir}"
-    ARCHIVE_DIR="${ARCHIVE_BASE}/${dir}"
-    RESTORE_DEST="${RESTORE_BASE}/${dir}"
+# Retrieve function
+do_retrieve() {
+    local PACK_SOURCE="$1"
+    local ARCHIVE_DIR="$2"
+    local RESTORE_DEST="$3"
+    local NAME="$4"
     
     echo ""
     echo "----------------------------------------"
-    echo "Retrieving: $dir"
+    echo "Retrieving: $NAME"
     echo "Archive: $ARCHIVE_DIR"
     echo "Tar ball staging: $PACK_SOURCE"
     echo "Restore to: $RESTORE_DEST"
@@ -136,7 +147,6 @@ for dir in $DIRS; do
     
     if [ "$DRY_RUN" = true ]; then
         echo "[DRY RUN] Would run: unpackems -d $RESTORE_DEST $PACK_SOURCE"
-        # Check if INDEX.txt exists
         if [ -f "${PACK_SOURCE}/INDEX.txt" ]; then
             echo "[DRY RUN] INDEX.txt found, listing contents:"
             head -20 "${PACK_SOURCE}/INDEX.txt"
@@ -145,14 +155,22 @@ for dir in $DIRS; do
         fi
     else
         mkdir -p "$RESTORE_DEST"
-        
-        # Unpack tar balls to restore destination
-        # -d: destination directory for unpacked files
         unpackems -d "$RESTORE_DEST" "$PACK_SOURCE"
     fi
     
-    echo "Completed: $dir at $(date)"
-done
+    echo "Completed: $NAME at $(date)"
+}
+
+# Retrieve either subdirectories or entire archive
+if [ -n "$DIRS" ]; then
+    for dir in $DIRS; do
+        do_retrieve "${SCRATCH_BASE}/${dir}" "${ARCHIVE_BASE}/${dir}" "${RESTORE_BASE}/${dir}" "$dir"
+    done
+else
+    # Retrieve entire archive
+    PREFIX=$(basename "$ARCHIVE_BASE")
+    do_retrieve "${SCRATCH_BASE}/${PREFIX}" "$ARCHIVE_BASE" "$RESTORE_BASE" "$PREFIX"
+fi
 
 echo ""
 echo "========================================"

@@ -46,8 +46,9 @@ DEST_BASE="/arch/${PROJECT}/${USERNAME}/awiesm3-develop/SPIN2"
 # Scratch directory for staging tar balls (should have enough space)
 SCRATCH_BASE="/scratch/${USERNAME:0:1}/${USERNAME}/packems_staging"
 
-# Space-separated list of subdirectories to archive
-DIRS="run_19900101-19991231 log scripts"
+# Space-separated list of subdirectories to archive (optional)
+# Leave empty to archive the entire SOURCE_BASE directory
+DIRS=""
 
 # Packems settings: target and max tar ball size in GB
 TAR_TARGET_GB=100
@@ -72,7 +73,11 @@ usage() {
     echo "  SOURCE_BASE:   $SOURCE_BASE"
     echo "  DEST_BASE:     $DEST_BASE"
     echo "  SCRATCH_BASE:  $SCRATCH_BASE"
-    echo "  DIRS:          $DIRS"
+    if [ -n "$DIRS" ]; then
+        echo "  DIRS:          $DIRS"
+    else
+        echo "  DIRS:          (entire source directory)"
+    fi
     echo "  TAR_TARGET_GB: $TAR_TARGET_GB"
     echo ""
     echo "Examples:"
@@ -112,18 +117,20 @@ validate_config() {
         errors=$((errors + 1))
     fi
     
-    # Check if at least one source directory exists
-    local found=0
-    for dir in $DIRS; do
-        if [ -d "${SOURCE_BASE}/${dir}" ]; then
-            found=$((found + 1))
+    # If DIRS specified, check at least one exists
+    if [ -n "$DIRS" ]; then
+        local found=0
+        for dir in $DIRS; do
+            if [ -d "${SOURCE_BASE}/${dir}" ]; then
+                found=$((found + 1))
+            fi
+        done
+        
+        if [ $found -eq 0 ]; then
+            echo "ERROR: None of the specified directories exist in $SOURCE_BASE"
+            echo "       Directories specified: $DIRS"
+            errors=$((errors + 1))
         fi
-    done
-    
-    if [ $found -eq 0 ]; then
-        echo "ERROR: None of the specified directories exist in $SOURCE_BASE"
-        echo "       Directories specified: $DIRS"
-        errors=$((errors + 1))
     fi
     
     return $errors
@@ -143,7 +150,11 @@ echo "Configuration:"
 echo "  Source:      $SOURCE_BASE"
 echo "  Archive:     $DEST_BASE"
 echo "  Staging:     $SCRATCH_BASE"
-echo "  Directories: $DIRS"
+if [ -n "$DIRS" ]; then
+    echo "  Directories: $DIRS"
+else
+    echo "  Directories: (entire source directory)"
+fi
 echo "  Tar size:    ${TAR_TARGET_GB}GB (max ${TAR_MAX_GB}GB)"
 echo ""
 
@@ -159,49 +170,55 @@ if [ "$DRY_RUN" = false ]; then
     mkdir -p "$SCRATCH_BASE"
 fi
 
-for dir in $DIRS; do
-    SOURCE="${SOURCE_BASE}/${dir}"
-    PACK_DEST="${SCRATCH_BASE}/${dir}"
-    ARCHIVE_DEST="${DEST_BASE}/${dir}"
+# Archive function
+do_archive() {
+    local SOURCE="$1"
+    local PACK_DEST="$2"
+    local ARCHIVE_DEST="$3"
+    local PREFIX="$4"
     
-    if [ -d "$SOURCE" ]; then
-        echo ""
-        echo "----------------------------------------"
-        echo "Archiving: $dir"
-        echo "Source: $SOURCE"
-        echo "Tar ball staging: $PACK_DEST"
-        echo "Archive destination: $ARCHIVE_DEST"
-        echo "Started: $(date)"
-        echo "----------------------------------------"
-        
-        if [ "$DRY_RUN" = true ]; then
-            echo "[DRY RUN] Would run: packems -t $TAR_TARGET_GB -m $TAR_MAX_GB -d $PACK_DEST -S $ARCHIVE_DEST -o ${dir} $SOURCE"
-            # Show directory size estimate
-            if command -v du &> /dev/null; then
-                echo "[DRY RUN] Source size: $(du -sh "$SOURCE" 2>/dev/null | cut -f1)"
-            fi
-        else
-            mkdir -p "$PACK_DEST"
-            
-            # Pack files into tar balls and archive to tape
-            # -t: target tar ball size in GB
-            # -m: max tar ball size in GB
-            # -d: local destination for tar balls
-            # -S: archive subdirectory on tape
-            # -o: prefix for tar ball names
-            packems \
-                -t "$TAR_TARGET_GB" -m "$TAR_MAX_GB" \
-                -d "$PACK_DEST" \
-                -S "$ARCHIVE_DEST" \
-                -o "${dir}" \
-                "$SOURCE"
+    echo ""
+    echo "----------------------------------------"
+    echo "Archiving: $PREFIX"
+    echo "Source: $SOURCE"
+    echo "Tar ball staging: $PACK_DEST"
+    echo "Archive destination: $ARCHIVE_DEST"
+    echo "Started: $(date)"
+    echo "----------------------------------------"
+    
+    if [ "$DRY_RUN" = true ]; then
+        echo "[DRY RUN] Would run: packems -t $TAR_TARGET_GB -m $TAR_MAX_GB -d $PACK_DEST -S $ARCHIVE_DEST -o $PREFIX $SOURCE"
+        if command -v du &> /dev/null; then
+            echo "[DRY RUN] Source size: $(du -sh "$SOURCE" 2>/dev/null | cut -f1)"
         fi
-        
-        echo "Completed: $dir at $(date)"
     else
-        echo "WARNING: Directory not found, skipping: $SOURCE"
+        mkdir -p "$PACK_DEST"
+        packems \
+            -t "$TAR_TARGET_GB" -m "$TAR_MAX_GB" \
+            -d "$PACK_DEST" \
+            -S "$ARCHIVE_DEST" \
+            -o "$PREFIX" \
+            "$SOURCE"
     fi
-done
+    
+    echo "Completed: $PREFIX at $(date)"
+}
+
+# Archive either subdirectories or entire source
+if [ -n "$DIRS" ]; then
+    for dir in $DIRS; do
+        SOURCE="${SOURCE_BASE}/${dir}"
+        if [ -d "$SOURCE" ]; then
+            do_archive "$SOURCE" "${SCRATCH_BASE}/${dir}" "${DEST_BASE}/${dir}" "$dir"
+        else
+            echo "WARNING: Directory not found, skipping: $SOURCE"
+        fi
+    done
+else
+    # Archive entire SOURCE_BASE
+    PREFIX=$(basename "$SOURCE_BASE")
+    do_archive "$SOURCE_BASE" "${SCRATCH_BASE}/${PREFIX}" "$DEST_BASE" "$PREFIX"
+fi
 
 echo ""
 echo "========================================"
