@@ -38,16 +38,18 @@ USERNAME="${USER}"
 PROJECT="ab0995"
 
 # Source directory containing subdirectories to archive
-SOURCE_BASE="/work/${PROJECT}/${USERNAME}/path/to/data"
+# Example: /work/ab0995/k204221/runtime/my_experiment
+SOURCE_BASE="/work/${PROJECT}/${USERNAME}/runtime/my_experiment"
 
 # Destination on tape archive
-DEST_BASE="/arch/${PROJECT}/${USERNAME}/path/to/archive"
+# Example: /arch/ab0995/k204221/my_experiment
+DEST_BASE="/arch/${PROJECT}/${USERNAME}/my_experiment"
 
 # Scratch directory for staging tar balls
 SCRATCH_BASE="/scratch/${USERNAME:0:1}/${USERNAME}/packems_staging"
 
 # Subdirectories to archive (space-separated)
-DIRS="dir1 dir2 dir3"
+DIRS="outdata restart log"
 ```
 
 ### 2. Update SLURM account
