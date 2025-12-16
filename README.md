@@ -24,6 +24,16 @@ Retrieves archived data from tape storage back to work filesystem.
 - `packems` module (loaded automatically by scripts)
 - Write access to source, scratch, and archive destinations
 
+## One-Liner
+
+```bash
+# Archive
+git clone https://github.com/CliDyn/dkrz_levante_tape_archive_scripts.git && cd dkrz_levante_tape_archive_scripts && vim archive.sh && ./archive.sh --dry-run
+
+# Retrieve
+vim retrieve.sh && ./retrieve.sh --dry-run
+```
+
 ## Quick Start
 
 ### 1. Configure the script
