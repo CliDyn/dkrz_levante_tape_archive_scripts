@@ -187,13 +187,15 @@ do_archive() {
     echo "----------------------------------------"
     
     if [ "$DRY_RUN" = true ]; then
-        echo "[DRY RUN] Would run: packems -t $TAR_TARGET_GB -m $TAR_MAX_GB -d $PACK_DEST -S $ARCHIVE_DEST -o $PREFIX $SOURCE"
+        echo "[DRY RUN] Would run: packems -a -t $TAR_TARGET_GB -m $TAR_MAX_GB -d $PACK_DEST -S $ARCHIVE_DEST -o $PREFIX $SOURCE"
         if command -v du &> /dev/null; then
             echo "[DRY RUN] Source size: $(du -sh "$SOURCE" 2>/dev/null | cut -f1)"
         fi
     else
         mkdir -p "$PACK_DEST"
+        # -a flag is required to actually transfer to tape, not just create tar balls
         packems \
+            -a \
             -t "$TAR_TARGET_GB" -m "$TAR_MAX_GB" \
             -d "$PACK_DEST" \
             -S "$ARCHIVE_DEST" \
