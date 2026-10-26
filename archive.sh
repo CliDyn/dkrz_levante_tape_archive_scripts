@@ -47,6 +47,7 @@ usage() {
     echo "  --window N        Max finished tar balls waiting on scratch (default 3, with --delete-scratch)"
     echo "  --target-gb N     Target tar ball size in GB (default 190)"
     echo "  --max-gb N        Maximum tar ball size in GB (default 200)"
+    echo "  --group NAME      Group of the archived files (default: project in DEST, e.g. bb1469)"
     echo "  --staging DIR     Where tar balls are written (default /scratch/<u>/<user>/archive_staging/<name>)"
     echo "  --state DIR       Plan, logs and checksums (default /work/<project>/<user>/archive_state/<name>)"
     echo "  -n, --dry-run     Only create and show the packing plan"
@@ -75,6 +76,7 @@ TARGET_GB=190
 MAX_GB=200
 STAGING=""
 STATE=""
+GROUP=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -84,6 +86,7 @@ while [[ $# -gt 0 ]]; do
         --window) WINDOW=$2; shift ;;
         --target-gb) TARGET_GB=$2; shift ;;
         --max-gb) MAX_GB=$2; shift ;;
+        --group) GROUP=$2; shift ;;
         --staging) STAGING=$2; shift ;;
         --state) STATE=$2; shift ;;
         -n|--dry-run) DRY_RUN=true ;;
@@ -114,6 +117,14 @@ if $DELETE_SCRATCH && ! $MD5; then
     die "--delete-scratch needs --md5"
 fi
 
+# atlas gives new files the user's primary group, so set the group afterwards
+if [ -z "$GROUP" ]; then
+    [[ $DEST =~ ^/hsm/[^/]+/([^/]+)/ ]] || die "Cannot derive a group from $DEST, pass --group"
+    GROUP=${BASH_REMATCH[1]}
+fi
+id -Gn | tr ' ' '\n' | grep -qxF "$GROUP" || die "You are not a member of group $GROUP"
+OWNER="$(id -u):$(getent group "$GROUP" | cut -d: -f3)"
+
 # The batch script runs from a spool copy, so locate the repository through Slurm
 if [ -n "${SLURM_JOB_ID:-}" ]; then
     SCRIPT_PATH=$(scontrol show job "$SLURM_JOB_ID" | sed -n 's/^ *Command=\([^ ]*\).*/\1/p')
@@ -140,7 +151,8 @@ echo "  Source:         $SOURCE"
 echo "  Archive:        $DEST"
 echo "  Staging:        $STAGING"
 echo "  State:          $STATE"
-echo "  Tar size:       ${TARGET_GB}GB (max ${MAX_GB}GB)"
+echo "  Group:          $GROUP"
+echo "  Tar size:      ${TARGET_GB}GB (max ${MAX_GB}GB)"
 echo "  md5 check:      $MD5"
 echo "  tar compare:    $COMPARE"
 echo "  Delete scratch: $DELETE_SCRATCH (window $WINDOW)"
@@ -162,6 +174,15 @@ if [ -f "$CONFIG" ]; then
         || die "$STATE was used for a different source or destination, see $CONFIG"
 else
     printf 'SOURCE\t%s\nDEST\t%s\nNAME\t%s\n' "$SOURCE" "$DEST" "$NAME" > "$CONFIG"
+fi
+
+# Archive folders this run creates get $GROUP at the end; existing ones are left alone
+if ! $DRY_RUN && [ ! -f "$STATE/new_dirs" ]; then
+    p=$DEST
+    while [[ $p == /hsm/*/* ]] && ! atlas ls "$p/" > /dev/null 2>&1; do
+        echo "$p"
+        p=$(dirname "$p")
+    done > "$STATE/new_dirs"
 fi
 cp "$SCRIPT_DIR/delete_source.py" "$STATE/delete_source.py"
 
@@ -269,7 +290,14 @@ process_tar() {
         pid_cmp=$!
     fi
 
-    upload_file "$tarfile" || ok=false
+    if upload_file "$tarfile"; then
+        if ! atlas chown "$OWNER" "$DEST/$n"; then
+            echo "atlas chown $OWNER $DEST/$n failed"
+            ok=false
+        fi
+    else
+        ok=false
+    fi
 
     if [ -n "$pid_md5" ] && ! wait "$pid_md5"; then
         echo "md5sum of $tarfile failed"
@@ -385,7 +413,7 @@ echo ""
 echo "========================================"
 log "$NDONE of $TOTAL tar balls uploaded and verified, run time $((ELAPSED / 3600))h $((ELAPSED % 3600 / 60))m"
 if [ $PACKED_BYTES -gt 0 ] && [ $ELAPSED -gt 0 ]; then
-    log "Packed $((PACKED_BYTES / 1000000000)) GB in this run, $((PACKED_BYTES / ELAPSED / 1000000)) MB/s end to end"
+    log "Packed $(awk -v s="$PACKED_BYTES" 'BEGIN {printf "%.1f", s / 1e9}') GB in this run, $((PACKED_BYTES / ELAPSED / 1000000)) MB/s end to end"
 fi
 if [ -f "$STATE/FAILED" ] || [ "$NDONE" -ne "$TOTAL" ]; then
     [ -f "$STATE/FAILED" ] && cat "$STATE/FAILED"
@@ -417,8 +445,12 @@ for f in "$STATE/INDEX.txt" "$STAGING/${NAME}_meta.tar"; do
     l=$(md5sum "$f" | cut -d' ' -f1)
     r=$(remote_md5 "$DEST/$(basename "$f")")
     [ "$l" = "$r" ] || die "md5 mismatch for $(basename "$f"): local $l, archive $r"
+    atlas chown "$OWNER" "$DEST/$(basename "$f")" > /dev/null || die "atlas chown of $(basename "$f") failed"
 done
 rm -f "$STAGING/${NAME}_meta.tar"
+while read -r d; do
+    atlas chown "$OWNER" "$d" > /dev/null || die "atlas chown of $d failed"
+done < "$STATE/new_dirs"
 
 echo ""
 echo "========================================"

@@ -60,6 +60,7 @@ Change `#SBATCH --account` if the job should not be charged to bb1469.
 | `--delete-scratch` | Remove each tar ball from scratch once all enabled checks passed (needs `--md5`) |
 | `--window N` | Max finished tar balls waiting on scratch, default 3 |
 | `--target-gb N` / `--max-gb N` | Tar ball size, default 190 / 200 GB |
+| `--group NAME` | Group of the archived files and of folders the run creates, default the project in DEST (e.g. `bb1469`) |
 | `--staging DIR` | Tar balls, default `/scratch/<u>/<user>/archive_staging/<name>` |
 | `--state DIR` | Plan, logs, checksums, `delete_source.sh`, default `/work/<project>/<user>/archive_state/<name>` |
 | `-n, --dry-run` | Only create and show the packing plan |
@@ -77,6 +78,7 @@ Change `#SBATCH --account` if the job should not be charged to bb1469.
 ## Notes
 
 - Every archived file is accounted as at least 1 GB, which is why small files are packed
+- `atlas cp` gives new files your primary group, ignoring the source file and the destination folder; `archive.sh` fixes this with `atlas chown` after each verified upload
 - Measured on 2026-10-26: packing ~440 MB/s, `atlas cp` ~290 MB/s (one 61 GB tar ball)
 - An upload ends in the archive's disk cache (flag `-o--v`); DKRZ writes it to tape later (flag `a`)
 - Files in folders starting with `.` and Slurm output files are not written to tape when archived unpacked; inside a tar ball they are safe
