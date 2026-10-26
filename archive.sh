@@ -47,7 +47,7 @@ usage() {
     echo "  --window N        Max finished tar balls waiting on scratch (default 3, with --delete-scratch)"
     echo "  --target-gb N     Target tar ball size in GB (default 190)"
     echo "  --max-gb N        Maximum tar ball size in GB (default 200)"
-    echo "  --group NAME      Group of the archived files (default: project in DEST, e.g. bb1469)"
+    echo "  --group NAME      Group of archived files and created folders (default: project in DEST, e.g. bb1469)"
     echo "  --staging DIR     Where tar balls are written (default /scratch/<u>/<user>/archive_staging/<name>)"
     echo "  --state DIR       Plan, logs and checksums (default /work/<project>/<user>/archive_state/<name>)"
     echo "  -n, --dry-run     Only create and show the packing plan"

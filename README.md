@@ -11,10 +11,11 @@ Scripts to archive data to the DKRZ tape archive on Levante. Since July 2026 the
 - Optionally compares a local `md5sum` with the md5 stored in the archive (`--md5`)
 - Optionally compares each tar ball against the source files with `tar --compare` (`--compare`)
 - Optionally removes each tar ball from scratch once its checks passed (`--delete-scratch`), so scratch only holds a few tar balls at a time
+- Sets the group of every archived file and of the folders it creates (`--group`, default the project in DEST), because `atlas cp` always uses your primary group
 - Uploads `INDEX.txt` (which file is in which tar ball) and `<name>_meta.tar` (plan, logs, checksums)
 - Never modifies the source
 
-When every tar ball passed all checks, it writes `delete_source.sh` to the state directory. Deleting the source is left to you.
+When the run used `--md5` and `--compare` and every tar ball passed all checks, it writes `delete_source.sh` to the state directory. Deleting the source is left to you.
 
 ## Scripts
 
@@ -22,7 +23,7 @@ When every tar ball passed all checks, it writes `delete_source.sh` to the state
 Packs, uploads and verifies a directory. Resubmitting the same command resumes after a failure or time limit; finished tar balls are skipped.
 
 ### `delete_source.py`
-Called through the `delete_source.sh` that `archive.sh` writes. Dry run by default. It refuses to delete until every tar ball is written to tape (flag `a` in `atlas ls -l`), and only removes files whose type, size and mtime still match what was packed. Files that were never packed are listed and kept.
+Called through the `delete_source.sh` that `archive.sh` writes. Dry run by default. It refuses to delete until every tar ball is written to tape (flag `a` in `atlas ls -l`), and only removes files whose type, size and mtime still match what was packed. Files that were never packed are listed and kept. Afterwards it removes every folder under the source that is empty, including folders that were empty from the start (those are not in the archive). Deleted files are listed in `deleted_<date>.log` in the state directory.
 
 ### `retrieve.sh`
 Still uses `slk` and does not work on Versity. Retrieve by searching `INDEX.txt`, then `atlas stage` and `atlas cp` the tar balls to `/scratch`.
@@ -39,8 +40,10 @@ atlas login
     /work/bb1469/a270092/runtime/lpjg-spinup-develop/lpj_spinup_HR_2000y \
     /hsm/arch/bb1469/a270092/lpjg-spinup-develop/lpj_spinup_HR_2000y
 
-# 3. Archive
-sbatch archive.sh --md5 --compare --delete-scratch \
+# 3. Archive (the state directory must exist for the Slurm log)
+mkdir -p /work/bb1469/a270092/archive_state/lpj_spinup_HR_2000y
+sbatch -o /work/bb1469/a270092/archive_state/lpj_spinup_HR_2000y/archive_%j.log \
+    archive.sh --md5 --compare --delete-scratch \
     /work/bb1469/a270092/runtime/lpjg-spinup-develop/lpj_spinup_HR_2000y \
     /hsm/arch/bb1469/a270092/lpjg-spinup-develop/lpj_spinup_HR_2000y
 
@@ -49,7 +52,7 @@ sbatch archive.sh --md5 --compare --delete-scratch \
 /work/bb1469/a270092/archive_state/lpj_spinup_HR_2000y/delete_source.sh --yes  # delete
 ```
 
-Change `#SBATCH --account` if the job should not be charged to bb1469.
+Change `#SBATCH --account` if the job should not be charged to bb1469. Without `-o`, the Slurm log `archive_<jobid>.log` is written to the directory you submit from.
 
 ## Options
 
@@ -69,9 +72,9 @@ Change `#SBATCH --account` if the job should not be charged to bb1469.
 
 | Path | Copies | Kept until |
 |------|--------|------------|
-| `/hsm/arch/<project>` | 1 (Hamburg) | project end + 1 year |
-| `/hsm/double/<project>` | 2 (Hamburg, Garching) | project end + 1 year |
-| `/hsm/doku/<project>` | 2 | project end + 10 years, curated by DKRZ (Archive Long-Term quota) |
+| `/hsm/arch/<project>` | Hamburg only | project end + 1 year |
+| `/hsm/double/<project>` | Hamburg and Garching | project end + 1 year |
+| `/hsm/doku/<project>` | Hamburg and Garching | project end + 10 years, curated by DKRZ (Archive Long-Term quota) |
 
 `/hsm/doku` cannot be written by users; ask support@dkrz.de to take data over from `/hsm/arch`.
 
