@@ -1,114 +1,86 @@
 # DKRZ Levante Tape Archive Scripts
 
-Scripts to archive and retrieve data from DKRZ tape storage on Levante using [`packems`](https://code.mpimet.mpg.de/projects/esmenv/wiki/Packems).
+Scripts to archive data to the DKRZ tape archive on Levante. Since July 2026 the archive runs on Versity and is accessed with `atlas` (`module load tape`). StrongLink and `slk` are gone, and `packems` can no longer upload, so `packems` is only used to plan how files are split into tar balls.
 
 ## Overview
 
-These scripts simplify archiving large datasets to tape storage by:
-- Bundling many small files into ~100GB tar balls using `packems`
-- Providing configurable paths and settings
-- Supporting dry-run mode to preview operations
-- Handling batch archiving of multiple directories
+`archive.sh` archives one directory:
+- Plans ~190 GB tar balls with `packems -N`
+- Packs one tar ball at a time on scratch and checks the `tar` exit code
+- Uploads each tar ball with `atlas cp --checksum md5` while the next one is packed
+- Optionally compares a local `md5sum` with the md5 stored in the archive (`--md5`)
+- Optionally compares each tar ball against the source files with `tar --compare` (`--compare`)
+- Optionally removes each tar ball from scratch once its checks passed (`--delete-scratch`), so scratch only holds a few tar balls at a time
+- Uploads `INDEX.txt` (which file is in which tar ball) and `<name>_meta.tar` (plan, logs, checksums)
+- Never modifies the source
+
+When every tar ball passed all checks, it writes `delete_source.sh` to the state directory. Deleting the source is left to you.
 
 ## Scripts
 
 ### `archive.sh`
-Archives directories from work filesystem to tape storage.
+Packs, uploads and verifies a directory. Resubmitting the same command resumes after a failure or time limit; finished tar balls are skipped.
+
+### `delete_source.py`
+Called through the `delete_source.sh` that `archive.sh` writes. Dry run by default. It refuses to delete until every tar ball is written to tape (flag `a` in `atlas ls -l`), and only removes files whose type, size and mtime still match what was packed. Files that were never packed are listed and kept.
 
 ### `retrieve.sh`
-Retrieves archived data from tape storage back to work filesystem.
-
-## Requirements
-
-- Access to DKRZ Levante HPC system
-- `packems` module (loaded automatically by scripts)
-- Write access to source, scratch, and archive destinations
+Still uses `slk` and does not work on Versity. Retrieve by searching `INDEX.txt`, then `atlas stage` and `atlas cp` the tar balls to `/scratch`.
 
 ## Quick Start
 
-### 1. Configure the script
-
-Edit the `CONFIGURATION` section in each script:
-
 ```bash
-# Your username (auto-detected)
-USERNAME="${USER}"
+# 1. Log in to the archive (valid for 30 days)
+module load tape
+atlas login
 
-# Project account for paths
-PROJECT="ab0995"
+# 2. Preview the plan
+./archive.sh --dry-run \
+    /work/bb1469/a270092/runtime/lpjg-spinup-develop/lpj_spinup_HR_2000y \
+    /hsm/arch/bb1469/a270092/lpjg-spinup-develop/lpj_spinup_HR_2000y
 
-# Source directory containing subdirectories to archive
-# Example: /work/ab0995/k204221/runtime/my_experiment
-SOURCE_BASE="/work/${PROJECT}/${USERNAME}/runtime/my_experiment"
+# 3. Archive
+sbatch archive.sh --md5 --compare --delete-scratch \
+    /work/bb1469/a270092/runtime/lpjg-spinup-develop/lpj_spinup_HR_2000y \
+    /hsm/arch/bb1469/a270092/lpjg-spinup-develop/lpj_spinup_HR_2000y
 
-# Destination on tape archive
-# Example: /arch/ab0995/k204221/my_experiment
-DEST_BASE="/arch/${PROJECT}/${USERNAME}/my_experiment"
-
-# Scratch directory for staging tar balls
-SCRATCH_BASE="/scratch/${USERNAME:0:1}/${USERNAME}/packems_staging"
-
-# Subdirectories to archive (optional, space-separated)
-# Leave empty to archive the entire SOURCE_BASE directory
-DIRS="outdata restart log"
+# 4. Later, once the tar balls are on tape
+/work/bb1469/a270092/archive_state/lpj_spinup_HR_2000y/delete_source.sh        # dry run
+/work/bb1469/a270092/archive_state/lpj_spinup_HR_2000y/delete_source.sh --yes  # delete
 ```
 
-### 2. Update SLURM account
-
-Change the `#SBATCH --account` line to your project account.
-
-### 3. Test with dry-run
-
-```bash
-# Preview what will be archived
-./archive.sh --dry-run
-
-# Preview what will be retrieved
-./retrieve.sh --dry-run
-```
-
-### 4. Run the archive/retrieve
-
-```bash
-# Submit as batch job (recommended for large datasets)
-sbatch archive.sh
-sbatch retrieve.sh
-
-# Or run interactively (for small datasets)
-./archive.sh
-./retrieve.sh
-```
+Change `#SBATCH --account` if the job should not be charged to bb1469.
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
-| `-h, --help` | Show help message and current configuration |
-| `-n, --dry-run` | Preview operations without making changes |
+| `--md5` | Compare `md5sum` of each local tar ball with the md5 stored in the archive |
+| `--compare` | Compare each tar ball against the source files (`tar --compare`) |
+| `--delete-scratch` | Remove each tar ball from scratch once all enabled checks passed (needs `--md5`) |
+| `--window N` | Max finished tar balls waiting on scratch, default 3 |
+| `--target-gb N` / `--max-gb N` | Tar ball size, default 190 / 200 GB |
+| `--staging DIR` | Tar balls, default `/scratch/<u>/<user>/archive_staging/<name>` |
+| `--state DIR` | Plan, logs, checksums, `delete_source.sh`, default `/work/<project>/<user>/archive_state/<name>` |
+| `-n, --dry-run` | Only create and show the packing plan |
 
-## Packems Settings
+## Archive locations
 
-The scripts use these default `packems` settings:
+| Path | Copies | Kept until |
+|------|--------|------------|
+| `/hsm/arch/<project>` | 1 (Hamburg) | project end + 1 year |
+| `/hsm/double/<project>` | 2 (Hamburg, Garching) | project end + 1 year |
+| `/hsm/doku/<project>` | 2 | project end + 10 years, curated by DKRZ (Archive Long-Term quota) |
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `TAR_TARGET_GB` | 100 | Target tar ball size in GB |
-| `TAR_MAX_GB` | 110 | Maximum tar ball size in GB |
-
-Adjust these in the configuration section if needed.
-
-## Output
-
-- **Staging directory**: Contains tar balls and INDEX.txt files
-- **INDEX.txt**: Lists all files packed in each tar ball (useful for finding specific files)
-- **Archive location**: Final destination on tape storage
+`/hsm/doku` cannot be written by users; ask support@dkrz.de to take data over from `/hsm/arch`.
 
 ## Notes
 
-- Archiving large datasets can take several hours
-- The scratch directory needs sufficient space for staging tar balls
-- Each archived directory gets its own INDEX.txt for tracking contents
-- Use `--dry-run` to estimate sizes before archiving
+- Every archived file is accounted as at least 1 GB, which is why small files are packed
+- Measured on 2026-10-26: packing ~440 MB/s, `atlas cp` ~290 MB/s (one 61 GB tar ball)
+- An upload ends in the archive's disk cache (flag `-o--v`); DKRZ writes it to tape later (flag `a`)
+- Files in folders starting with `.` and Slurm output files are not written to tape when archived unpacked; inside a tar ball they are safe
+- Documentation: https://docs.dkrz.de/doc/datastorage/versity/index.html
 
 ## License
 
