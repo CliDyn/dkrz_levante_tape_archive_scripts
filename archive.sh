@@ -4,7 +4,7 @@
 #SBATCH --account=bb1469
 #SBATCH --time=7-00:00:00
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --mem=16G
 #SBATCH --output=archive_%j.log
 
 # =============================================================================
@@ -45,8 +45,10 @@ usage() {
     echo "  --compare         Compare each tar ball against the source files (tar --compare)"
     echo "  --delete-scratch  Remove each staged tar ball once all enabled checks passed (needs --md5)"
     echo "  --window N        Max finished tar balls waiting on scratch (default 3, with --delete-scratch)"
-    echo "  --target-gb N     Target tar ball size in GB (default 190)"
-    echo "  --max-gb N        Maximum tar ball size in GB (default 200)"
+    echo "  --target-gb N     Target tar ball size in GB before compression (default 190)"
+    echo "  --max-gb N        Maximum tar ball size in GB before compression (default 200)"
+    echo "  --zstd            Compress tar balls with zstd (.tar.zst), using all CPUs of the job"
+    echo "  --zstd-level N    zstd compression level (default 3, implies --zstd)"
     echo "  --group NAME      Group of archived files and created folders (default: project in DEST, e.g. bb1469)"
     echo "  --staging DIR     Where tar balls are written (default /scratch/<u>/<user>/archive_staging/<name>)"
     echo "  --state DIR       Plan, logs and checksums (default /work/<project>/<user>/archive_state/<name>)"
@@ -77,6 +79,7 @@ MAX_GB=200
 STAGING=""
 STATE=""
 GROUP=""
+ZSTD_LEVEL=""
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -87,6 +90,8 @@ while [[ $# -gt 0 ]]; do
         --target-gb) TARGET_GB=$2; shift ;;
         --max-gb) MAX_GB=$2; shift ;;
         --group) GROUP=$2; shift ;;
+        --zstd) ZSTD_LEVEL=${ZSTD_LEVEL:-3} ;;
+        --zstd-level) ZSTD_LEVEL=$2; shift ;;
         --staging) STAGING=$2; shift ;;
         --state) STATE=$2; shift ;;
         -n|--dry-run) DRY_RUN=true ;;
@@ -125,6 +130,17 @@ fi
 id -Gn | tr ' ' '\n' | grep -qxF "$GROUP" || die "You are not a member of group $GROUP"
 OWNER="$(id -u):$(getent group "$GROUP" | cut -d: -f3)"
 
+# zstd is not a module; look it up before 'module purge' changes PATH
+EXT=""
+COMPRESS=none
+if [ -n "$ZSTD_LEVEL" ]; then
+    [[ $ZSTD_LEVEL =~ ^[0-9]+$ ]] || die "--zstd-level needs a number: $ZSTD_LEVEL"
+    ZSTD=$(command -v zstd) || die "zstd not found in PATH"
+    THREADS=${SLURM_CPUS_PER_TASK:-4}
+    EXT=.zst
+    COMPRESS=zstd
+fi
+
 # The batch script runs from a spool copy, so locate the repository through Slurm
 if [ -n "${SLURM_JOB_ID:-}" ]; then
     SCRIPT_PATH=$(scontrol show job "$SLURM_JOB_ID" | sed -n 's/^ *Command=\([^ ]*\).*/\1/p')
@@ -152,7 +168,12 @@ echo "  Archive:        $DEST"
 echo "  Staging:        $STAGING"
 echo "  State:          $STATE"
 echo "  Group:          $GROUP"
-echo "  Tar size:      ${TARGET_GB}GB (max ${MAX_GB}GB)"
+echo "  Tar size:       ${TARGET_GB}GB (max ${MAX_GB}GB) before compression"
+if [ -n "$EXT" ]; then
+    echo "  Compression:    zstd level $ZSTD_LEVEL, $THREADS threads"
+else
+    echo "  Compression:    none"
+fi
 echo "  md5 check:      $MD5"
 echo "  tar compare:    $COMPARE"
 echo "  Delete scratch: $DELETE_SCRATCH (window $WINDOW)"
@@ -172,8 +193,11 @@ CONFIG="$STATE/config"
 if [ -f "$CONFIG" ]; then
     grep -qxF "SOURCE	$SOURCE" "$CONFIG" && grep -qxF "DEST	$DEST" "$CONFIG" \
         || die "$STATE was used for a different source or destination, see $CONFIG"
+    old=$(awk -F '\t' '$1 == "COMPRESS" {print $2}' "$CONFIG")
+    [ "${old:-none}" = "$COMPRESS" ] \
+        || die "$STATE was used with compression '${old:-none}', this run uses '$COMPRESS'"
 else
-    printf 'SOURCE\t%s\nDEST\t%s\nNAME\t%s\n' "$SOURCE" "$DEST" "$NAME" > "$CONFIG"
+    printf 'SOURCE\t%s\nDEST\t%s\nNAME\t%s\nCOMPRESS\t%s\n' "$SOURCE" "$DEST" "$NAME" "$COMPRESS" > "$CONFIG"
 fi
 
 # Archive folders this run creates get $GROUP at the end; existing ones are left alone
@@ -278,7 +302,8 @@ remote_md5() {
 
 process_tar() {
     local n=$1
-    local tarfile="$STAGING/$n" pid_md5="" pid_cmp="" ok=true rc l r
+    local f="$n$EXT"
+    local tarfile="$STAGING/$f" pid_md5="" pid_cmp="" ok=true rc l r
     local t0=$SECONDS
 
     if $MD5; then
@@ -286,13 +311,17 @@ process_tar() {
         pid_md5=$!
     fi
     if $COMPARE; then
-        tar -b 2048 -C / -df "$tarfile" > "$STATE/logs/$n.compare" 2>&1 &
+        if [ -n "$EXT" ]; then
+            { "$ZSTD" -dcq "$tarfile" | tar -b 2048 -C / -df -; } > "$STATE/logs/$n.compare" 2>&1 &
+        else
+            tar -b 2048 -C / -df "$tarfile" > "$STATE/logs/$n.compare" 2>&1 &
+        fi
         pid_cmp=$!
     fi
 
     if upload_file "$tarfile"; then
-        if ! atlas chown "$OWNER" "$DEST/$n"; then
-            echo "atlas chown $OWNER $DEST/$n failed"
+        if ! atlas chown "$OWNER" "$DEST/$f"; then
+            echo "atlas chown $OWNER $DEST/$f failed"
             ok=false
         fi
     else
@@ -315,7 +344,7 @@ process_tar() {
     fi
     if $MD5 && $ok; then
         l=$(cut -d' ' -f1 "$STATE/md5/$n.local")
-        r=$(remote_md5 "$DEST/$n")
+        r=$(remote_md5 "$DEST/$f")
         if [ -n "$l" ] && [ "$l" = "$r" ]; then
             echo "$l" > "$STATE/md5/$n.ok"
             echo "md5 matches archive: $l"
@@ -354,7 +383,7 @@ EOF
 }
 
 staged_count() {
-    find "$STAGING" -maxdepth 1 -type f -name "${NAME}_*.tar" | wc -l
+    find "$STAGING" -maxdepth 1 -type f -name "${NAME}_*.tar$EXT" | wc -l
 }
 
 if ! $DELETE_SCRATCH; then
@@ -362,9 +391,11 @@ if ! $DELETE_SCRATCH; then
 fi
 
 START=$SECONDS
+RAW_BYTES=0
 PACKED_BYTES=0
 for lst in "${LISTS[@]}"; do
     n=$(basename "$lst" .lst)
+    f="$n$EXT"
     [ -f "$STATE/done/$n" ] && continue
     [ -f "$STATE/FAILED" ] && break
 
@@ -375,30 +406,42 @@ for lst in "${LISTS[@]}"; do
         [ -f "$STATE/FAILED" ] && break
     fi
 
-    if [ -f "$STATE/packed/$n" ] && [ -f "$STAGING/$n" ]; then
-        log "$n: already packed, resuming upload"
+    if [ -f "$STATE/packed/$n" ] && [ -f "$STAGING/$f" ]; then
+        log "$f: already packed, resuming upload"
     else
-        log "$n: packing $(wc -l < "$lst") files ..."
+        log "$f: packing $(wc -l < "$lst") files ..."
         t0=$SECONDS
-        rm -f "$STAGING/$n" "$STAGING/$n~" "$STATE/packed/$n"
-        tar -b 2048 --index-file="$STATE/idx/$n.idx" -cvvf "$STAGING/$n~" -T "$lst" \
-            > /dev/null 2> "$STATE/logs/$n.tar.err"
-        rc=$?
-        # Exit 1 means a file changed while it was read, 2 a file could not be read
-        if [ $rc -ne 0 ]; then
-            fail "$n: tar exited with $rc, see $STATE/logs/$n.tar.err"
+        rm -f "$STAGING/$f" "$STAGING/$f~" "$STATE/packed/$n"
+        if [ -n "$EXT" ]; then
+            tar -b 2048 --index-file="$STATE/idx/$n.idx" -cvvf - -T "$lst" 2> "$STATE/logs/$n.tar.err" \
+                | "$ZSTD" "-$ZSTD_LEVEL" -T"$THREADS" -q -o "$STAGING/$f~" 2> "$STATE/logs/$n.zstd.err"
+            rcs=("${PIPESTATUS[@]}")
+        else
+            tar -b 2048 --index-file="$STATE/idx/$n.idx" -cvvf "$STAGING/$f~" -T "$lst" \
+                > /dev/null 2> "$STATE/logs/$n.tar.err"
+            rcs=($? 0)
+        fi
+        # tar exit 1 means a file changed while it was read, 2 a file could not be read
+        if [ "${rcs[0]}" -ne 0 ]; then
+            fail "$f: tar exited with ${rcs[0]}, see $STATE/logs/$n.tar.err"
             break
         fi
-        mv "$STAGING/$n~" "$STAGING/$n"
+        if [ "${rcs[1]}" -ne 0 ]; then
+            fail "$f: zstd exited with ${rcs[1]}, see $STATE/logs/$n.zstd.err"
+            break
+        fi
+        mv "$STAGING/$f~" "$STAGING/$f"
         if ! write_manifest "$lst" "$STATE/manifest/$n.tsv" 2> "$STATE/logs/$n.manifest.err"; then
-            fail "$n: could not record file sizes, see $STATE/logs/$n.manifest.err"
+            fail "$f: could not record file sizes, see $STATE/logs/$n.manifest.err"
             break
         fi
         touch "$STATE/packed/$n"
-        size=$(stat -c %s "$STAGING/$n")
+        raw=$(awk -F '\t' '{s += $2} END {printf "%d", s}' "$STATE/manifest/$n.tsv")
+        size=$(stat -c %s "$STAGING/$f")
+        RAW_BYTES=$((RAW_BYTES + raw))
         PACKED_BYTES=$((PACKED_BYTES + size))
         dt=$((SECONDS - t0))
-        log "$n: packed $(awk -v s="$size" 'BEGIN {printf "%.1f", s / 1e9}') GB in ${dt} s ($((size / (dt > 0 ? dt : 1) / 1000000)) MB/s)"
+        log "$f: packed $(awk -v r="$raw" -v s="$size" 'BEGIN {printf "%.1f GB into %.1f GB (%.1fx)", r / 1e9, s / 1e9, r / (s > 0 ? s : 1)}') in ${dt} s ($((raw / (dt > 0 ? dt : 1) / 1000000)) MB/s read)"
     fi
 
     process_tar "$n" > "$STATE/logs/$n.log" 2>&1 &
@@ -412,8 +455,8 @@ ELAPSED=$((SECONDS - START))
 echo ""
 echo "========================================"
 log "$NDONE of $TOTAL tar balls uploaded and verified, run time $((ELAPSED / 3600))h $((ELAPSED % 3600 / 60))m"
-if [ $PACKED_BYTES -gt 0 ] && [ $ELAPSED -gt 0 ]; then
-    log "Packed $(awk -v s="$PACKED_BYTES" 'BEGIN {printf "%.1f", s / 1e9}') GB in this run, $((PACKED_BYTES / ELAPSED / 1000000)) MB/s end to end"
+if [ $RAW_BYTES -gt 0 ] && [ $ELAPSED -gt 0 ]; then
+    log "Packed $(awk -v r="$RAW_BYTES" -v s="$PACKED_BYTES" 'BEGIN {printf "%.1f GB into %.1f GB (%.1fx)", r / 1e9, s / 1e9, r / s}') in this run, $((RAW_BYTES / ELAPSED / 1000000)) MB/s end to end"
 fi
 if [ -f "$STATE/FAILED" ] || [ "$NDONE" -ne "$TOTAL" ]; then
     [ -f "$STATE/FAILED" ] && cat "$STATE/FAILED"
@@ -433,7 +476,7 @@ log "Writing INDEX.txt and ${NAME}_meta.tar ..."
     echo "---"
     for lst in "${LISTS[@]}"; do
         n=$(basename "$lst" .lst)
-        awk -v t="$n" '{print $0 " -> " t}' "$STATE/idx/$n.idx"
+        awk -v t="$n$EXT" '{print $0 " -> " t}' "$STATE/idx/$n.idx"
     done
 } > "$STATE/INDEX.txt"
 tar -C "$STATE" -cf "$STAGING/${NAME}_meta.tar" config plan.log plan idx manifest md5 compare logs INDEX.txt \
