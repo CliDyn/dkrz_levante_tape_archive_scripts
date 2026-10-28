@@ -1,6 +1,6 @@
 # DKRZ Levante Tape Archive Scripts
 
-Scripts to archive data to the DKRZ tape archive on Levante and get it back. Since July 2026 the archive runs on Versity and is accessed with `atlas` (`module load tape`). StrongLink and `slk` are gone, and `packems` can no longer upload, so `packems` is only used to plan how files are split into tar balls.
+Scripts to archive data to the DKRZ tape archive (Versity) on Levante and get it back. The archive is accessed with `atlas` (`module load tape`); `packems` only plans how files are split into tar balls.
 
 ## Scripts
 
@@ -23,7 +23,7 @@ Resubmitting the same command resumes after a failure or time limit; finished ta
 Called through the `delete_source.sh` that `archive.sh` writes. Dry run by default. It refuses to delete until every tar ball is written to tape (flag `a` in `atlas ls -l`), and only removes files whose type, size and mtime still match what was packed. Files that were never packed are listed and kept. Afterwards it removes every folder under the source that is empty, including folders that were empty from the start (those are not in the archive). Deleted files are listed in `deleted_<date>.log` in the state directory. File checks and deletions run in parallel (`--jobs N`, default 32).
 
 ### `retrieve.sh`
-Gets files back from an archive folder written by `archive.sh` or by `packems -a` on StrongLink:
+Gets files back from an archive folder written by `archive.sh` or by `packems -a`:
 - Reads `INDEX.txt` and selects files (`--match REGEX` on the original path, default all)
 - Stages only the tar balls that hold them from tape, then downloads them to scratch a few at a time
 - Checks the md5 against the archive where one is stored
