@@ -25,9 +25,9 @@
 #        sbatch archive.sh --md5 --compare --delete-scratch SOURCE DEST
 #
 # Example:
-#   sbatch archive.sh --md5 --compare --delete-scratch \
-#       /work/bb1469/a270092/runtime/lpjg-spinup-develop/lpj_spinup_HR_2000y \
-#       /hsm/arch/bb1469/a270092/lpjg-spinup-develop/lpj_spinup_HR_2000y
+#   sbatch archive.sh --md5 --compare --delete-scratch --zstd \
+#       /work/ab1234/$USER/runtime/my_experiment \
+#       /hsm/arch/ab1234/$USER/my_experiment
 #
 # Resubmitting the same command resumes: finished tar balls are skipped.
 # =============================================================================
@@ -49,7 +49,7 @@ usage() {
     echo "  --max-gb N        Maximum tar ball size in GB before compression (default 200)"
     echo "  --zstd            Compress tar balls with zstd (.tar.zst), using all CPUs of the job"
     echo "  --zstd-level N    zstd compression level (default 3, implies --zstd)"
-    echo "  --group NAME      Group of archived files and created folders (default: project in DEST, e.g. bb1469)"
+    echo "  --group NAME      Group of archived files and created folders (default: project in DEST, e.g. ab1234)"
     echo "  --staging DIR     Where tar balls are written (default /scratch/<u>/<user>/archive_staging/<name>)"
     echo "  --state DIR       Plan, logs and checksums (default /work/<project>/<user>/archive_state/<name>)"
     echo "  -n, --dry-run     Only create and show the packing plan"
