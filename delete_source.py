@@ -9,7 +9,7 @@ size and mtime still match what was packed. Directories left empty afterwards
 are removed too. Files that were never packed are listed and kept.
 
 Lustre metadata calls are slow one at a time, so stat, directory listing and
-unlink run in parallel (--jobs).
+unlink run in parallel threads (--jobs).
 """
 
 import argparse
@@ -38,15 +38,31 @@ def read_config(state):
     return cfg
 
 
-def archive_flags(path):
-    """Return the ScoutAM flags of one archived file, e.g. 'ao--v'."""
+def atlas_ls(path):
+    """Return the JSON listing of an archive path."""
     out = subprocess.run(['atlas', 'ls', '-l', '--format', 'json', path],
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                          universal_newlines=True)
     if out.returncode != 0:
-        raise RuntimeError('atlas ls %s failed: %s' % (path, out.stdout.strip()))
-    entries = json.loads(out.stdout).get('entries', [])
-    return entries[0].get('flags', '') if entries else ''
+        die('atlas ls %s failed: %s' % (path, out.stdout.strip()))
+    return json.loads(out.stdout)
+
+
+def archive_flags(dest, names):
+    """Return the ScoutAM flags (e.g. 'ao--v') of the named files in dest.
+
+    One listing of dest covers all files. Each atlas process starts dozens of
+    threads, so running one per file in parallel hits the login node's limit.
+    """
+    listing = atlas_ls(dest + '/')
+    if not listing.get('summary', {}).get('has_more'):
+        flags = {e['name']: e.get('flags', '') for e in listing.get('entries', [])}
+        return [flags.get(n, '') for n in names]
+    result = []
+    for n in names:
+        entries = atlas_ls(dest + '/' + n).get('entries', [])
+        result.append(entries[0].get('flags', '') if entries else '')
+    return result
 
 
 def show(title, paths, limit=20):
@@ -142,10 +158,7 @@ def main():
         print('Skipping the tape check (--no-tape-check)')
     else:
         print('Checking that every tar ball is written to tape ...')
-        try:
-            flags = list(pool.map(archive_flags, [dest + '/' + t + ext for t in tars]))
-        except RuntimeError as e:
-            die(str(e))
+        flags = archive_flags(dest, [t + ext for t in tars])
         not_on_tape = [t + ext for t, fl in zip(tars, flags) if not fl.startswith('a')]
         if not_on_tape:
             show('Tar balls not yet written to tape (flag a)', not_on_tape)
