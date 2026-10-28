@@ -20,7 +20,7 @@ Archives one directory:
 Resubmitting the same command resumes after a failure or time limit; finished tar balls are skipped. When the run used `--md5` and `--compare` and every tar ball passed all checks, it writes `delete_source.sh` to the state directory. Deleting the source is left to you.
 
 ### `delete_source.py`
-Called through the `delete_source.sh` that `archive.sh` writes. Dry run by default. It refuses to delete until every tar ball is written to tape (flag `a` in `atlas ls -l`), and only removes files whose type, size and mtime still match what was packed. Files that were never packed are listed and kept. Afterwards it removes every folder under the source that is empty, including folders that were empty from the start (those are not in the archive). Deleted files are listed in `deleted_<date>.log` in the state directory. File checks and deletions run in parallel (`--jobs N`, default 32).
+Called through the `delete_source.sh` that `archive.sh` writes. Dry run by default. It refuses to delete until every tar ball is written to tape (flag `a` in `atlas ls -l`), and only removes files whose type, size and mtime still match what was packed. Files that were never packed are listed and kept. Afterwards it removes every folder under the source that is empty, including folders that were empty from the start (those are not in the archive), and then the source folder itself if nothing is left in it. Deleted files are listed in `deleted_<date>.log` in the state directory. File checks and deletions run in parallel (`--jobs N`, default 32).
 
 ### `retrieve.sh`
 Gets files back from an archive folder written by `archive.sh` or by `packems -a`:

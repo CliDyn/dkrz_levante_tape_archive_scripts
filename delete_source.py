@@ -214,9 +214,10 @@ def main():
     for err in errors[:20]:
         print('could not delete ' + err)
 
-    # Deepest directories first, so parents are empty by the time they come up
+    # Deepest directories first, so parents are empty by the time they come up,
+    # and the source itself last
     removed_dirs = 0
-    for d in sorted(dirs, key=lambda p: p.count('/'), reverse=True):
+    for d in sorted(dirs, key=lambda p: p.count('/'), reverse=True) + [source]:
         try:
             os.rmdir(d)
             removed_dirs += 1
