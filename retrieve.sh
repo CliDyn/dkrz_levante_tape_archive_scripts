@@ -10,7 +10,7 @@
 # Retrieve data from the DKRZ Versity tape archive (ATLAS)
 #
 # Works on archive folders written by archive.sh (.tar or .tar.zst) and on
-# folders written by 'packems -a' to StrongLink before July 2026. Reads
+# folders written by 'packems -a'. Reads
 # INDEX.txt to find which tar balls hold the requested files, stages them from
 # tape, downloads them to scratch a few at a time, checks their md5 and
 # unpacks them. Existing files are never overwritten.
@@ -391,7 +391,7 @@ for t in "${TODO[@]}"; do
         [ "$l" = "$r" ] || die "$t: md5 mismatch, local $l, archive $r"
         check="md5 ok"
     else
-        # Tar balls from packems/StrongLink have no md5; atlas cp verified the copy with sha1
+        # Tar balls from packems have no md5; atlas cp verified the copy with sha1
         check="no md5 in archive, copy verified by atlas"
     fi
 
