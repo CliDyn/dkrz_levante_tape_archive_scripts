@@ -245,6 +245,11 @@ fi
 mkdir -p "$STATE"/{plan,idx,manifest,md5,compare,packed,done,logs} || die "Cannot create $STATE"
 mkdir -p "$STAGING" || die "Cannot create $STAGING"
 
+# One job per state directory: a second one would pack and upload the same tar
+# balls. The background uploads inherit the lock, so it is held until they end.
+exec 9> "$STATE/lock"
+flock -n 9 || die "Another archive.sh is already working on $STATE"
+
 # A state directory belongs to one source, destination and mode
 CONFIG="$STATE/config"
 if [ -f "$CONFIG" ]; then
