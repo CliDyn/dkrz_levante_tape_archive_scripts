@@ -177,24 +177,33 @@ stage_files() {
     wait_job "$id"
 }
 
-# Start a copy of one archive file to $STAGING/tars/ and print the job id
+# Start a copy of one archive file (path below $ARCHIVE, may include a folder)
+# to the same path below $STAGING/tars/ and print the job id
 start_copy() {
-    local out id
-    out=$(atlas cp --force "$1" "$STAGING/tars/" 2>&1)
+    local out id dir
+    dir=$(dirname "$STAGING/tars/$1")
+    mkdir -p "$dir"
+    out=$(atlas cp --force "$ARCHIVE/$1" "$dir/" 2>&1)
     id=$(job_id "$out")
     [ -n "$id" ] || { echo "atlas cp did not start: $out" >&2; return 1; }
     echo "$id"
 }
 
+# Log file name for a tar ball, without folders
+logname() {
+    echo "${1//\//_}"
+}
+
 # Copy one archive file, staging it again if it fell out of the cache
 copy_file() {
-    local id
+    local id l
+    l="$STAGING/logs/copy_$(logname "$1").log"
     id=$(start_copy "$1") || return 1
-    if ! wait_job "$id" > "$STAGING/logs/copy_$(basename "$1").log"; then
-        grep -q "stage it first" "$STAGING/logs/copy_$(basename "$1").log" || return 1
-        stage_files "$1" || return 1
+    if ! wait_job "$id" > "$l"; then
+        grep -q "stage it first" "$l" || return 1
+        stage_files "$ARCHIVE/$1" || return 1
         id=$(start_copy "$1") || return 1
-        wait_job "$id" > "$STAGING/logs/copy_$(basename "$1").log" || return 1
+        wait_job "$id" > "$l" || return 1
     fi
 }
 
@@ -221,7 +230,7 @@ print(e[0]['flags'] if e else 'missing')" "$LISTING")
         stage_files "$ARCHIVE/INDEX.txt" > "$STAGING/logs/stage_INDEX.txt.log" \
             || die "Staging INDEX.txt failed, see $STAGING/logs/stage_INDEX.txt.log"
     fi
-    copy_file "$ARCHIVE/INDEX.txt" || die "Download of INDEX.txt failed, see $STAGING/logs/"
+    copy_file INDEX.txt || die "Download of INDEX.txt failed, see $STAGING/logs/"
     mv "$INDEX" "$STAGING/plan/INDEX.txt"
 fi
 
@@ -238,10 +247,10 @@ if [ -f "$SELECTION" ] && ! cmp -s "$SELECTION" "$SELECTION.new"; then
 fi
 mv "$SELECTION.new" "$SELECTION"
 
-/usr/bin/python3 -I - "$STAGING/plan" "$LISTING" "$RESTORE" "${MATCHES[@]+"${MATCHES[@]}"}" <<'EOF' \
+/usr/bin/python3 -I - "$STAGING/plan" "$ARCHIVE" "$RESTORE" "${MATCHES[@]+"${MATCHES[@]}"}" <<'EOF' \
     || die "Could not read INDEX.txt"
-import json, os, re, sys
-plan, listing, restore, patterns = sys.argv[1], sys.argv[2], sys.argv[3] == 'true', sys.argv[4:]
+import json, os, re, subprocess, sys
+plan, archive, restore, patterns = sys.argv[1], sys.argv[2], sys.argv[3] == 'true', sys.argv[4:]
 regexes = [re.compile(p) for p in patterns]
 ENC = dict(encoding='utf-8', errors='surrogateescape')
 
@@ -280,11 +289,6 @@ source = source.rstrip('/')
 # Keep the source folder's own name: strip the components of its parent
 strip = 0 if restore else len([c for c in os.path.dirname(source).split('/') if c])
 
-online, sizes = {}, {}
-for e in json.load(open(listing))['entries']:
-    online[e['name']] = e.get('flags', '')[1:2] == 'o'
-    sizes[e['name']] = e.get('size', 0)
-
 members, nbytes = {}, 0
 for tar, path, size in entries:
     if regexes and not any(r.search(path) for r in regexes):
@@ -292,9 +296,30 @@ for tar, path, size in entries:
     members.setdefault(tar, []).append(path.lstrip('/'))
     nbytes += size
 
+
+def atlas_ls(path, *flags):
+    out = subprocess.run(['atlas', 'ls', '-l', '--format', 'json'] + list(flags) + [path],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+    return json.loads(out.stdout) if out.returncode == 0 else {'entries': []}
+
+
+# Tar balls may sit in folders (oifs/x.tar); names in a recursive listing are relative
+online, sizes = {}, {}
+listing = atlas_ls(archive + '/', '-R')
+for e in listing.get('entries', []):
+    online[e['name']] = e.get('flags', '')[1:2] == 'o'
+    sizes[e['name']] = e.get('size', 0)
+if listing.get('summary', {}).get('has_more'):
+    for t in members:
+        if t not in sizes:
+            for e in atlas_ls(archive + '/' + t).get('entries', []):
+                online[t] = e.get('flags', '')[1:2] == 'o'
+                sizes[t] = e.get('size', 0)
+
 missing = [t for t in members if t not in sizes]
 with open(os.path.join(plan, 'tars.txt'), 'w') as out:
     for tar in sorted(members):
+        os.makedirs(os.path.dirname(os.path.join(plan, tar + '.members')), exist_ok=True)
         with open(os.path.join(plan, tar + '.members'), 'w', **ENC) as m:
             m.write('\n'.join(members[tar]) + '\n')
         out.write('%s\t%d\t%d\t%d\n' % (tar, len(members[tar]), sizes.get(tar, 0), online.get(tar, False)))
@@ -364,7 +389,7 @@ start_next() {
     while [ $next -lt ${#TODO[@]} ] && [ ${#COPY_JOB[@]} -lt "$WINDOW" ]; do
         local t=${TODO[$next]}
         if [ ! -f "$STAGING/tars/$t" ]; then
-            COPY_JOB[$t]=$(start_copy "$ARCHIVE/$t") || die "Could not start download of $t"
+            COPY_JOB[$t]=$(start_copy "$t") || die "Could not start download of $t"
         else
             COPY_JOB[$t]=local
         fi
@@ -375,11 +400,13 @@ start_next() {
 for t in "${TODO[@]}"; do
     start_next
     tarfile="$STAGING/tars/$t"
+    copylog="$STAGING/logs/copy_$(logname "$t").log"
+    unpacklog="$STAGING/logs/unpack_$(logname "$t").err"
     if [ "${COPY_JOB[$t]}" != local ]; then
-        if ! wait_job "${COPY_JOB[$t]}" > "$STAGING/logs/copy_$t.log"; then
+        if ! wait_job "${COPY_JOB[$t]}" > "$copylog"; then
             # The cache gives no guarantee that staged files stay online
-            grep -q "stage it first" "$STAGING/logs/copy_$t.log" || die "Download of $t failed, see $STAGING/logs/copy_$t.log"
-            copy_file "$ARCHIVE/$t" || die "Download of $t failed, see $STAGING/logs/copy_$t.log"
+            grep -q "stage it first" "$copylog" || die "Download of $t failed, see $copylog"
+            copy_file "$t" || die "Download of $t failed, see $copylog"
         fi
     fi
     unset "COPY_JOB[$t]"
@@ -404,15 +431,16 @@ for t in "${TODO[@]}"; do
     fi
     tarflags+=(--verbatim-files-from -T "$STAGING/plan/$t.members")
     if [[ $t == *.zst ]]; then
-        "$ZSTD" -dcq "$tarfile" | tar "${tarflags[@]}" -f - 2> "$STAGING/logs/unpack_$t.err"
+        "$ZSTD" -dcq "$tarfile" | tar "${tarflags[@]}" -f - 2> "$unpacklog"
         rcs=("${PIPESTATUS[@]}")
     else
-        tar "${tarflags[@]}" -f "$tarfile" 2> "$STAGING/logs/unpack_$t.err"
+        tar "${tarflags[@]}" -f "$tarfile" 2> "$unpacklog"
         rcs=($? 0)
     fi
-    [ "${rcs[1]}" -eq 0 ] || die "$t: zstd exited with ${rcs[1]}, see $STAGING/logs/unpack_$t.err"
-    [ "${rcs[0]}" -eq 0 ] || die "$t: tar exited with ${rcs[0]}, see $STAGING/logs/unpack_$t.err"
+    [ "${rcs[1]}" -eq 0 ] || die "$t: zstd exited with ${rcs[1]}, see $unpacklog"
+    [ "${rcs[0]}" -eq 0 ] || die "$t: tar exited with ${rcs[0]}, see $unpacklog"
 
+    mkdir -p "$(dirname "$STAGING/done/$t")"
     date '+%F %T' > "$STAGING/done/$t"
     $KEEP_TARS || rm -f "$tarfile"
     log "$t: $(awk -F '\t' -v t="$t" '$1 == t {print $2}' "$STAGING/plan/tars.txt") files unpacked in $((SECONDS - t0)) s ($check)"
