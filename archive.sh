@@ -65,6 +65,7 @@ usage() {
     echo "  --state DIR       Plan, logs and checksums (default /work/<project>/<user>/archive_state/<name>)"
     echo "  --margin-hours N  Start no new tar ball when less than N hours of the job are left (default 4)"
     echo "  --no-resubmit     Do not submit a follow-up job when the time limit stops this one"
+    echo "  --update-tool     Replace the copy of the scripts in <state>/tool with this version"
     echo "  -n, --dry-run     Only create and show the packing plan"
     echo "  -h, --help        Show this help message and exit"
     echo ""
@@ -98,6 +99,7 @@ GROUP=""
 ZSTD_LEVEL=""
 MARGIN_HOURS=4
 RESUBMIT=true
+UPDATE_TOOL=false
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -116,6 +118,7 @@ while [[ $# -gt 0 ]]; do
         --state) STATE=$2; shift ;;
         --margin-hours) MARGIN_HOURS=$2; shift ;;
         --no-resubmit) RESUBMIT=false ;;
+        --update-tool) UPDATE_TOOL=true ;;
         -n|--dry-run) DRY_RUN=true ;;
         -h|--help) usage 0 ;;
         -*) echo "Unknown option: $1"; usage 1 ;;
@@ -181,7 +184,17 @@ if [ -n "${SLURM_JOB_ID:-}" ]; then
 else
     SCRIPT_PATH=$(realpath "${BASH_SOURCE[0]}")
 fi
+[ -n "${ARCHIVE_TOOL:-}" ] && SCRIPT_PATH="$ARCHIVE_TOOL/archive.sh"
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
+
+# Each archive runs from its own copy of the scripts in <state>/tool, so later
+# changes to the repository do not reach it or its follow-up jobs. Started from
+# the repository again, it hands over to that copy (--update-tool replaces it).
+TOOL="$STATE/tool"
+if [ "$SCRIPT_DIR" != "$TOOL" ] && [ -f "$TOOL/archive.sh" ] && ! $UPDATE_TOOL; then
+    log "Running the scripts copied to $TOOL ($(cut -c1-12 "$TOOL/VERSION" 2>/dev/null | head -1))"
+    ARCHIVE_TOOL=$TOOL exec /bin/bash "$TOOL/archive.sh" "${ORIG_ARGS[@]}"
+fi
 [ -f "$SCRIPT_DIR/delete_source.py" ] || die "delete_source.py not found next to $SCRIPT_PATH"
 if [ "$MODE" = awiesm3 ]; then
     [ -f "$SCRIPT_DIR/plan_awiesm3.py" ] || die "plan_awiesm3.py not found next to $SCRIPT_PATH"
@@ -249,6 +262,14 @@ mkdir -p "$STAGING" || die "Cannot create $STAGING"
 # balls. The background uploads inherit the lock, so it is held until they end.
 exec 9> "$STATE/lock"
 flock -n 9 || die "Another archive.sh is already working on $STATE"
+
+if ! $DRY_RUN && [ "$SCRIPT_DIR" != "$TOOL" ] && { $UPDATE_TOOL || [ ! -f "$TOOL/archive.sh" ]; }; then
+    mkdir -p "$TOOL" && cp "$SCRIPT_DIR"/{archive.sh,plan_awiesm3.py,delete_source.py} "$TOOL/" \
+        || die "Cannot copy the scripts to $TOOL"
+    { git -C "$SCRIPT_DIR" log -1 --format='%H %cd %s'; git -C "$SCRIPT_DIR" status --short; } \
+        > "$TOOL/VERSION" 2>&1
+    log "Copied the scripts to $TOOL, follow-up jobs run that copy"
+fi
 
 # A state directory belongs to one source, destination and mode
 CONFIG="$STATE/config"
@@ -604,7 +625,7 @@ if [ "$NDONE" -ne "$TOTAL" ]; then
         out=$(sbatch --parsable --dependency=afterany:"$SLURM_JOB_ID" \
                 --account="$account" --partition="$partition" --time="$timelimit" \
                 --output="$(dirname "$stdout")/archive_%j.log" \
-                "$SCRIPT_PATH" "${ORIG_ARGS[@]}" 2>&1) \
+                "$TOOL/archive.sh" "${ORIG_ARGS[@]}" 2>&1) \
             || die "Could not resubmit: $out. Resubmit the same command to resume."
         log "$((TOTAL - NDONE)) tar balls left, continuing in job $out"
         exit 0

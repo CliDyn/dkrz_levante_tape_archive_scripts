@@ -17,7 +17,7 @@ Archives one directory:
 - Uploads `INDEX.txt` (which file is in which tar ball) and `<name>_meta.tar` (plan, logs, checksums)
 - Never modifies the source
 
-A job runs for at most 2 days. When fewer than `--margin-hours` (default 4) are left, it starts no new tar ball, waits for the running uploads and submits itself again. Resubmitting the same command by hand also resumes after a failure; finished tar balls are skipped. When the run used `--md5` and `--compare` and every tar ball passed all checks, it writes `delete_source.sh` to the state directory. Deleting the source is left to you.
+The first real run copies the scripts to `<state>/tool/` (with the git commit in `tool/VERSION`). Follow-up jobs run that copy, and starting the same command from the repository again hands over to it, so changes to the repository never reach an archive in progress; `--update-tool` replaces the copy. A job runs for at most 2 days. When fewer than `--margin-hours` (default 4) are left, it starts no new tar ball, waits for the running uploads and submits itself again. Resubmitting the same command by hand also resumes after a failure; finished tar balls are skipped. When the run used `--md5` and `--compare` and every tar ball passed all checks, it writes `delete_source.sh` to the state directory. Deleting the source is left to you.
 
 ### `--mode awiesm3` (`plan_awiesm3.py`)
 For an AWI-ESM3 experiment folder, so that single variables can be retrieved, e.g. to cmorize them again, without the whole experiment:
@@ -97,6 +97,7 @@ Change `#SBATCH --account` in both scripts to the project that should be charged
 | `--state DIR` | Plan, logs, checksums, `delete_source.sh`, default `/work/<project>/<user>/archive_state/<name>` |
 | `--margin-hours N` | Start no new tar ball when fewer than N hours of the job are left, default 4 |
 | `--no-resubmit` | Do not submit a follow-up job when the time limit stops this one |
+| `--update-tool` | Replace the copy of the scripts in `<state>/tool` with the version you start |
 | `-n, --dry-run` | Only create and show the packing plan |
 
 ### `retrieve.sh`
