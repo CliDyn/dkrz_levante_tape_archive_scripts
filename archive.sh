@@ -2,7 +2,7 @@
 #SBATCH --job-name=archive
 #SBATCH --partition=shared
 #SBATCH --account=bb1469
-#SBATCH --time=7-00:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=archive_%j.log
@@ -10,11 +10,16 @@
 # =============================================================================
 # Archive a directory to the DKRZ Versity tape archive (ATLAS)
 #
-# Packs SOURCE into ~190 GB tar balls (packems plans the split, tar packs) and
-# uploads each tar ball with 'atlas cp --checksum md5' while the next one is
-# being packed. The source is never modified. When every tar ball has passed
-# all checks, a delete_source.sh is written to the state directory so the
-# source can be removed by hand.
+# Packs SOURCE into tar balls and uploads each tar ball with
+# 'atlas cp --checksum md5' while the next one is being packed. The source is
+# never modified. When every tar ball has passed all checks, a delete_source.sh
+# is written to the state directory so the source can be removed by hand.
+#
+# Modes:
+#   generic  (default) ~190 GB tar balls in directory order, planned by packems
+#   awiesm3  AWI-ESM3 experiment folder: one output variable per tar ball (in
+#            chunks of whole years), one tar ball per restart date, logs and
+#            config together; see plan_awiesm3.py
 #
 # Usage:
 #   1. Log in to the archive once (valid for 30 days):
@@ -29,7 +34,9 @@
 #       /work/ab1234/$USER/runtime/my_experiment \
 #       /hsm/arch/ab1234/$USER/my_experiment
 #
-# Resubmitting the same command resumes: finished tar balls are skipped.
+# A job stops starting new tar balls when its time limit comes close, waits for
+# the running uploads and submits itself again. Resubmitting the same command
+# by hand also resumes: finished tar balls are skipped.
 # =============================================================================
 
 set -u
@@ -41,17 +48,24 @@ usage() {
     echo "Pack SOURCE into tar balls and upload them to DEST (/hsm/...) with atlas."
     echo ""
     echo "Options:"
+    echo "  --mode MODE       generic (default) or awiesm3 (per-variable tar balls of an AWI-ESM3 experiment)"
     echo "  --md5             Compare md5sum of each local tar ball with the md5 stored in the archive"
     echo "  --compare         Compare each tar ball against the source files (tar --compare)"
     echo "  --delete-scratch  Remove each staged tar ball once all enabled checks passed (needs --md5)"
     echo "  --window N        Max finished tar balls waiting on scratch (default 3, with --delete-scratch)"
-    echo "  --target-gb N     Target tar ball size in GB before compression (default 190)"
-    echo "  --max-gb N        Maximum tar ball size in GB before compression (default 200)"
-    echo "  --zstd            Compress tar balls with zstd (.tar.zst), using all CPUs of the job"
+    echo "  --target-gb N     generic: target tar ball size in GB before compression (default 190)"
+    echo "  --max-gb N        Maximum tar ball size in GB (generic: before compression, default 200;"
+    echo "                    awiesm3: on tape, default 300)"
+    echo "  --min-gb N        awiesm3: smaller variables are bundled (default 10)"
+    echo "  --zstd            generic: compress tar balls with zstd (.tar.zst), using all CPUs of the job."
+    echo "                    awiesm3 decides per tar ball and always compresses where it pays off"
     echo "  --zstd-level N    zstd compression level (default 3, implies --zstd)"
     echo "  --group NAME      Group of archived files and created folders (default: project in DEST, e.g. ab1234)"
     echo "  --staging DIR     Where tar balls are written (default /scratch/<u>/<user>/archive_staging/<name>)"
     echo "  --state DIR       Plan, logs and checksums (default /work/<project>/<user>/archive_state/<name>)"
+    echo "  --margin-hours N  Start no new tar ball when less than N hours of the job are left (default 4)"
+    echo "  --no-resubmit     Do not submit a follow-up job when the time limit stops this one"
+    echo "  --update-tool     Replace the copy of the scripts in <state>/tool with this version"
     echo "  -n, --dry-run     Only create and show the packing plan"
     echo "  -h, --help        Show this help message and exit"
     echo ""
@@ -69,31 +83,42 @@ die() {
 }
 
 # Parse command line arguments
+ORIG_ARGS=("$@")
+MODE=generic
 MD5=false
 COMPARE=false
 DELETE_SCRATCH=false
 DRY_RUN=false
 WINDOW=3
 TARGET_GB=190
-MAX_GB=200
+MAX_GB=""
+MIN_GB=10
 STAGING=""
 STATE=""
 GROUP=""
 ZSTD_LEVEL=""
+MARGIN_HOURS=4
+RESUBMIT=true
+UPDATE_TOOL=false
 POSITIONAL=()
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --mode) MODE=$2; shift ;;
         --md5) MD5=true ;;
         --compare) COMPARE=true ;;
         --delete-scratch) DELETE_SCRATCH=true ;;
         --window) WINDOW=$2; shift ;;
         --target-gb) TARGET_GB=$2; shift ;;
         --max-gb) MAX_GB=$2; shift ;;
+        --min-gb) MIN_GB=$2; shift ;;
         --group) GROUP=$2; shift ;;
         --zstd) ZSTD_LEVEL=${ZSTD_LEVEL:-3} ;;
         --zstd-level) ZSTD_LEVEL=$2; shift ;;
         --staging) STAGING=$2; shift ;;
         --state) STATE=$2; shift ;;
+        --margin-hours) MARGIN_HOURS=$2; shift ;;
+        --no-resubmit) RESUBMIT=false ;;
+        --update-tool) UPDATE_TOOL=true ;;
         -n|--dry-run) DRY_RUN=true ;;
         -h|--help) usage 0 ;;
         -*) echo "Unknown option: $1"; usage 1 ;;
@@ -102,6 +127,13 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 [ ${#POSITIONAL[@]} -eq 2 ] || usage 1
+
+case $MODE in
+    generic) MAX_GB=${MAX_GB:-200} ;;
+    awiesm3) MAX_GB=${MAX_GB:-300}; ZSTD_LEVEL=${ZSTD_LEVEL:-3} ;;
+    *) die "Unknown mode: $MODE (generic or awiesm3)" ;;
+esac
+[[ $MARGIN_HOURS =~ ^[0-9]+$ ]] || die "--margin-hours needs a whole number: $MARGIN_HOURS"
 
 SOURCE=$(realpath -e "${POSITIONAL[0]}") || die "Source does not exist: ${POSITIONAL[0]}"
 [ -d "$SOURCE" ] || die "Source is not a directory: $SOURCE"
@@ -116,6 +148,9 @@ if [ -z "$STATE" ]; then
     [[ $SOURCE =~ ^/work/([^/]+)/ ]] || die "Cannot derive a project from $SOURCE, pass --state"
     STATE="/work/${BASH_REMATCH[1]}/${USER}/archive_state/${NAME}"
 fi
+# The archive server copies from these folders and only sees /work and /scratch
+[[ $STATE == /work/* || $STATE == /scratch/* ]] || die "State directory must be on /work or /scratch: $STATE"
+[[ $STAGING == /work/* || $STAGING == /scratch/* ]] || die "Staging directory must be on /work or /scratch: $STAGING"
 case "$STATE/" in "$SOURCE"/*) die "State directory must not be inside the source: $STATE" ;; esac
 case "$STAGING/" in "$SOURCE"/*) die "Staging directory must not be inside the source: $STAGING" ;; esac
 if $DELETE_SCRATCH && ! $MD5; then
@@ -130,25 +165,51 @@ fi
 id -Gn | tr ' ' '\n' | grep -qxF "$GROUP" || die "You are not a member of group $GROUP"
 OWNER="$(id -u):$(getent group "$GROUP" | cut -d: -f3)"
 
-# zstd is not a module; look it up before 'module purge' changes PATH
-EXT=""
+# zstd is not a module; look it up before 'module purge' changes PATH.
+# generic compresses all tar balls or none; awiesm3 decides per tar ball.
+ZSTD=""
 COMPRESS=none
 if [ -n "$ZSTD_LEVEL" ]; then
     [[ $ZSTD_LEVEL =~ ^[0-9]+$ ]] || die "--zstd-level needs a number: $ZSTD_LEVEL"
     ZSTD=$(command -v zstd) || die "zstd not found in PATH"
     THREADS=${SLURM_CPUS_PER_TASK:-4}
-    EXT=.zst
     COMPRESS=zstd
 fi
+[ "$MODE" = awiesm3 ] && COMPRESS=per-tar
 
 # The batch script runs from a spool copy, so locate the repository through Slurm
 if [ -n "${SLURM_JOB_ID:-}" ]; then
-    SCRIPT_PATH=$(scontrol show job "$SLURM_JOB_ID" | sed -n 's/^ *Command=\([^ ]*\).*/\1/p')
+    JOB_INFO=$(scontrol show job "$SLURM_JOB_ID")
+    SCRIPT_PATH=$(sed -n 's/^ *Command=\([^ ]*\).*/\1/p' <<<"$JOB_INFO")
 else
     SCRIPT_PATH=$(realpath "${BASH_SOURCE[0]}")
 fi
+[ -n "${ARCHIVE_TOOL:-}" ] && SCRIPT_PATH="$ARCHIVE_TOOL/archive.sh"
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
+
+# Each archive runs from its own copy of the scripts in <state>/tool, so later
+# changes to the repository do not reach it or its follow-up jobs. Started from
+# the repository again, it hands over to that copy (--update-tool replaces it).
+TOOL="$STATE/tool"
+if [ "$SCRIPT_DIR" != "$TOOL" ] && [ -f "$TOOL/archive.sh" ] && ! $UPDATE_TOOL; then
+    log "Running the scripts copied to $TOOL ($(cut -c1-12 "$TOOL/VERSION" 2>/dev/null | head -1))"
+    ARCHIVE_TOOL=$TOOL exec /bin/bash "$TOOL/archive.sh" "${ORIG_ARGS[@]}"
+fi
 [ -f "$SCRIPT_DIR/delete_source.py" ] || die "delete_source.py not found next to $SCRIPT_PATH"
+if [ "$MODE" = awiesm3 ]; then
+    [ -f "$SCRIPT_DIR/plan_awiesm3.py" ] || die "plan_awiesm3.py not found next to $SCRIPT_PATH"
+fi
+
+# Stop starting new tar balls this long before the job's time limit
+DEADLINE=""
+if [ -n "${SLURM_JOB_ID:-}" ] && ! $DRY_RUN; then
+    left=$(squeue -h -j "$SLURM_JOB_ID" -o %L 2>/dev/null)
+    if [[ $left =~ ^(([0-9]+)-)?(([0-9]+):)?([0-9]+):([0-9]+)$ ]]; then
+        secs=$(( ${BASH_REMATCH[2]:-0} * 86400 + 10#${BASH_REMATCH[4]:-0} * 3600 \
+                 + 10#${BASH_REMATCH[5]} * 60 + 10#${BASH_REMATCH[6]} ))
+        DEADLINE=$(( $(date +%s) + secs - MARGIN_HOURS * 3600 ))
+    fi
+fi
 
 module purge
 module load packems tape 2>/dev/null
@@ -163,20 +224,29 @@ fi
 echo "========================================"
 echo ""
 echo "Configuration:"
+echo "  Mode:           $MODE"
 echo "  Source:         $SOURCE"
 echo "  Archive:        $DEST"
 echo "  Staging:        $STAGING"
 echo "  State:          $STATE"
 echo "  Group:          $GROUP"
-echo "  Tar size:       ${TARGET_GB}GB (max ${MAX_GB}GB) before compression"
-if [ -n "$EXT" ]; then
-    echo "  Compression:    zstd level $ZSTD_LEVEL, $THREADS threads"
+if [ "$MODE" = awiesm3 ]; then
+    echo "  Tar size:       ${MIN_GB}-${MAX_GB}GB on tape"
+    echo "  Compression:    zstd level $ZSTD_LEVEL where it pays off, $THREADS threads"
 else
-    echo "  Compression:    none"
+    echo "  Tar size:       ${TARGET_GB}GB (max ${MAX_GB}GB) before compression"
+    if [ -n "$ZSTD" ]; then
+        echo "  Compression:    zstd level $ZSTD_LEVEL, $THREADS threads"
+    else
+        echo "  Compression:    none"
+    fi
 fi
 echo "  md5 check:      $MD5"
 echo "  tar compare:    $COMPARE"
 echo "  Delete scratch: $DELETE_SCRATCH (window $WINDOW)"
+if [ -n "$DEADLINE" ]; then
+    echo "  New tar balls:  until $(date -d "@$DEADLINE" '+%F %T') (${MARGIN_HOURS}h before the time limit)"
+fi
 echo ""
 
 if ! $DRY_RUN; then
@@ -188,16 +258,32 @@ fi
 mkdir -p "$STATE"/{plan,idx,manifest,md5,compare,packed,done,logs} || die "Cannot create $STATE"
 mkdir -p "$STAGING" || die "Cannot create $STAGING"
 
-# A state directory belongs to one source and destination
+# One job per state directory: a second one would pack and upload the same tar
+# balls. The background uploads inherit the lock, so it is held until they end.
+exec 9> "$STATE/lock"
+flock -n 9 || die "Another archive.sh is already working on $STATE"
+
+if ! $DRY_RUN && [ "$SCRIPT_DIR" != "$TOOL" ] && { $UPDATE_TOOL || [ ! -f "$TOOL/archive.sh" ]; }; then
+    mkdir -p "$TOOL" && cp "$SCRIPT_DIR"/{archive.sh,plan_awiesm3.py,delete_source.py} "$TOOL/" \
+        || die "Cannot copy the scripts to $TOOL"
+    { git -C "$SCRIPT_DIR" log -1 --format='%H %cd %s'; git -C "$SCRIPT_DIR" status --short; } \
+        > "$TOOL/VERSION" 2>&1
+    log "Copied the scripts to $TOOL, follow-up jobs run that copy"
+fi
+
+# A state directory belongs to one source, destination and mode
 CONFIG="$STATE/config"
 if [ -f "$CONFIG" ]; then
     grep -qxF "SOURCE	$SOURCE" "$CONFIG" && grep -qxF "DEST	$DEST" "$CONFIG" \
         || die "$STATE was used for a different source or destination, see $CONFIG"
+    old=$(awk -F '\t' '$1 == "MODE" {print $2}' "$CONFIG")
+    [ "${old:-generic}" = "$MODE" ] || die "$STATE was used in mode '${old:-generic}', this run uses '$MODE'"
     old=$(awk -F '\t' '$1 == "COMPRESS" {print $2}' "$CONFIG")
     [ "${old:-none}" = "$COMPRESS" ] \
         || die "$STATE was used with compression '${old:-none}', this run uses '$COMPRESS'"
 else
-    printf 'SOURCE\t%s\nDEST\t%s\nNAME\t%s\nCOMPRESS\t%s\n' "$SOURCE" "$DEST" "$NAME" "$COMPRESS" > "$CONFIG"
+    printf 'SOURCE\t%s\nDEST\t%s\nNAME\t%s\nCOMPRESS\t%s\nMODE\t%s\n' \
+        "$SOURCE" "$DEST" "$NAME" "$COMPRESS" "$MODE" > "$CONFIG"
 fi
 
 # Archive folders this run creates get $GROUP at the end; existing ones are left alone
@@ -217,33 +303,70 @@ fi
 rm -f "$STATE/ALL_OK" "$STATE/delete_source.sh"
 
 # =============================================================================
-# Plan: packems -N writes one file list (.lst) per tar ball without packing
+# Plan: one file list (.lst) per tar ball, and plan/tars.tsv with the tar ball
+# names (which may include a folder, e.g. oifs/tas_1850-1859.tar) and their
+# compression
 # =============================================================================
 
 PLAN="$STATE/plan"
 if [ ! -f "$STATE/plan.ok" ]; then
-    log "Planning tar balls with packems (scans the whole source) ..."
-    rm -f "$PLAN"/*
-    (cd "$PLAN" && packems -N -t "$TARGET_GB" -m "$MAX_GB" -o "$NAME" -d "$PLAN" -S "$DEST" "$SOURCE") \
-        > "$STATE/plan.log" 2>&1
-    rc=$?
-    [ $rc -eq 0 ] || die "packems planning failed (exit $rc), see $STATE/plan.log"
+    rm -rf "${PLAN:?}"/*
+    if [ "$MODE" = awiesm3 ]; then
+        log "Planning tar balls with plan_awiesm3.py (scans the source and samples compression) ..."
+        /usr/bin/python3 -I "$SCRIPT_DIR/plan_awiesm3.py" --min-gb "$MIN_GB" --max-gb "$MAX_GB" \
+            --zstd "$ZSTD" "$SOURCE" "$PLAN" > "$STATE/plan.log" 2>&1
+        rc=$?
+        [ $rc -eq 0 ] || die "plan_awiesm3.py failed (exit $rc), see $STATE/plan.log"
+    else
+        log "Planning tar balls with packems (scans the whole source) ..."
+        (cd "$PLAN" && packems -N -t "$TARGET_GB" -m "$MAX_GB" -o "$NAME" -d "$PLAN" -S "$DEST" "$SOURCE") \
+            > "$STATE/plan.log" 2>&1
+        rc=$?
+        [ $rc -eq 0 ] || die "packems planning failed (exit $rc), see $STATE/plan.log"
+    fi
     touch "$STATE/plan.ok"
 fi
-mapfile -t LISTS < <(ls "$PLAN"/"${NAME}"_*.tar.lst 2>/dev/null | sort)
-[ ${#LISTS[@]} -gt 0 ] || die "packems planned no tar balls, see $STATE/plan.log"
-TOTAL=${#LISTS[@]}
-NFILES=$(cat "${LISTS[@]}" | wc -l)
-log "Plan: $TOTAL tar balls, $NFILES files, $(tail -1 "$STATE/plan.log") GB"
+if [ "$MODE" = generic ] && [ ! -f "$PLAN/tars.tsv" ]; then
+    for lst in "$PLAN"/"${NAME}"_*.tar.lst; do
+        [ -f "$lst" ] && printf '%s\t%s\n' "$(basename "$lst" .lst)" "$COMPRESS"
+    done > "$PLAN/tars.tsv"
+fi
+
+TARS=()
+declare -A EXT_OF=()
+while IFS=$'\t' read -r n c _; do
+    TARS+=("$n")
+    if [ "$c" = zstd ]; then EXT_OF[$n]=.zst; else EXT_OF[$n]=""; fi
+done < "$PLAN/tars.tsv"
+TOTAL=${#TARS[@]}
+[ "$TOTAL" -gt 0 ] || die "No tar balls planned, see $STATE/plan.log"
+NFILES=$(for n in "${TARS[@]}"; do cat "$PLAN/$n.lst"; done | wc -l)
+if [ "$MODE" = awiesm3 ]; then
+    log "Plan: $TOTAL tar balls, $NFILES files, $(awk -F '\t' '{r += $4; t += $5} END {printf "%.0f GB, about %.0f GB on tape", r / 1e9, t / 1e9}' "$PLAN/tars.tsv")"
+else
+    log "Plan: $TOTAL tar balls, $NFILES files, $(tail -1 "$STATE/plan.log") GB"
+fi
 
 if $DRY_RUN; then
     echo ""
-    echo "Planned tar ball sizes (GB):"
-    grep -E "${NAME}_[0-9]+\.tar$" "$STATE/plan.log"
+    if [ "$MODE" = awiesm3 ]; then
+        cat "$STATE/plan.log"
+    else
+        echo "Planned tar ball sizes (GB):"
+        grep -E "${NAME}_[0-9]+\.tar$" "$STATE/plan.log"
+    fi
     echo ""
     echo "Dry run complete - nothing was packed or uploaded"
     exit 0
 fi
+
+# Tar balls in subfolders need the same subfolders in the state and staging directories
+for sub in $(printf '%s\n' "${TARS[@]}" | grep / | xargs -r -n1 dirname | sort -u); do
+    for d in idx manifest md5 compare packed done logs; do
+        mkdir -p "$STATE/$d/$sub"
+    done
+    mkdir -p "$STAGING/$sub"
+done
 
 # =============================================================================
 # Per tar ball: upload, md5 and compare run in a background worker
@@ -254,10 +377,18 @@ fail() {
     log "FAILED: $*"
 }
 
-# Copy one file to $DEST with atlas and wait for the copy job to end
+# Create an archive folder for tar balls in a subfolder, recording it for the final chown
+remote_dir() {
+    local d=$1
+    atlas ls "$d/" > /dev/null 2>&1 && return 0
+    atlas mkdir -p "$d" > /dev/null || return 1
+    echo "$d" >> "$STATE/new_dirs"
+}
+
+# Copy one file into an archive folder with atlas and wait for the copy job to end
 upload_file() {
-    local src=$1 out id state items errors=0 waited=0
-    out=$(atlas cp --force --checksum md5 "$src" "$DEST/" 2>&1)
+    local src=$1 dir=$2 out id state items errors=0 waited=0
+    out=$(atlas cp --force --checksum md5 "$src" "$dir/" 2>&1)
     id=$(sed -n 's/.*copy job submitted: *\([0-9][0-9]*\).*/\1/p' <<<"$out")
     if [ -z "$id" ]; then
         echo "atlas cp did not start: $out"
@@ -301,8 +432,8 @@ remote_md5() {
 }
 
 process_tar() {
-    local n=$1
-    local f="$n$EXT"
+    local n=$1 ext=$2
+    local f="$n$ext"
     local tarfile="$STAGING/$f" pid_md5="" pid_cmp="" ok=true rc l r
     local t0=$SECONDS
 
@@ -311,7 +442,7 @@ process_tar() {
         pid_md5=$!
     fi
     if $COMPARE; then
-        if [ -n "$EXT" ]; then
+        if [ -n "$ext" ]; then
             { "$ZSTD" -dcq "$tarfile" | tar -b 2048 -C / -df -; } > "$STATE/logs/$n.compare" 2>&1 &
         else
             tar -b 2048 -C / -df "$tarfile" > "$STATE/logs/$n.compare" 2>&1 &
@@ -319,7 +450,7 @@ process_tar() {
         pid_cmp=$!
     fi
 
-    if upload_file "$tarfile"; then
+    if upload_file "$tarfile" "$(dirname "$DEST/$f")"; then
         if ! atlas chown "$OWNER" "$DEST/$f"; then
             echo "atlas chown $OWNER $DEST/$f failed"
             ok=false
@@ -383,19 +514,30 @@ EOF
 }
 
 staged_count() {
-    find "$STAGING" -maxdepth 1 -type f -name "${NAME}_*.tar$EXT" | wc -l
+    find "$STAGING" -type f \( -name '*.tar' -o -name '*.tar.zst' \) | wc -l
+}
+
+count_done() {
+    local n c=0
+    for n in "${TARS[@]}"; do
+        [ -f "$STATE/done/$n" ] && c=$((c + 1))
+    done
+    echo $c
 }
 
 if ! $DELETE_SCRATCH; then
     log "WARNING: without --delete-scratch all tar balls stay on scratch (needs space for the whole source)"
 fi
 
+DONE_AT_START=$(count_done)
+STOPPED_FOR_TIME=false
 START=$SECONDS
 RAW_BYTES=0
 PACKED_BYTES=0
-for lst in "${LISTS[@]}"; do
-    n=$(basename "$lst" .lst)
-    f="$n$EXT"
+for n in "${TARS[@]}"; do
+    ext=${EXT_OF[$n]}
+    f="$n$ext"
+    lst="$PLAN/$n.lst"
     [ -f "$STATE/done/$n" ] && continue
     [ -f "$STATE/FAILED" ] && break
 
@@ -406,13 +548,24 @@ for lst in "${LISTS[@]}"; do
         [ -f "$STATE/FAILED" ] && break
     fi
 
+    if [ -n "$DEADLINE" ] && [ "$(date +%s)" -ge "$DEADLINE" ]; then
+        log "Less than ${MARGIN_HOURS}h left in this job, no new tar balls"
+        STOPPED_FOR_TIME=true
+        break
+    fi
+
+    if [[ $n == */* ]] && ! remote_dir "$(dirname "$DEST/$n")"; then
+        fail "$f: could not create $(dirname "$DEST/$n") in the archive"
+        break
+    fi
+
     if [ -f "$STATE/packed/$n" ] && [ -f "$STAGING/$f" ]; then
         log "$f: already packed, resuming upload"
     else
         log "$f: packing $(wc -l < "$lst") files ..."
         t0=$SECONDS
         rm -f "$STAGING/$f" "$STAGING/$f~" "$STATE/packed/$n"
-        if [ -n "$EXT" ]; then
+        if [ -n "$ext" ]; then
             tar -b 2048 --index-file="$STATE/idx/$n.idx" -cvvf - -T "$lst" 2> "$STATE/logs/$n.tar.err" \
                 | "$ZSTD" "-$ZSTD_LEVEL" -T"$THREADS" -q -o "$STAGING/$f~" 2> "$STATE/logs/$n.zstd.err"
             rcs=("${PIPESTATUS[@]}")
@@ -444,13 +597,13 @@ for lst in "${LISTS[@]}"; do
         log "$f: packed $(awk -v r="$raw" -v s="$size" 'BEGIN {printf "%.1f GB into %.1f GB (%.1fx)", r / 1e9, s / 1e9, r / (s > 0 ? s : 1)}') in ${dt} s ($((raw / (dt > 0 ? dt : 1) / 1000000)) MB/s read)"
     fi
 
-    process_tar "$n" > "$STATE/logs/$n.log" 2>&1 &
+    process_tar "$n" "$ext" > "$STATE/logs/$n.log" 2>&1 &
 done
 
 log "Waiting for running uploads to finish ..."
 wait
 
-NDONE=$(find "$STATE/done" -maxdepth 1 -type f -name "${NAME}_*.tar" | wc -l)
+NDONE=$(count_done)
 ELAPSED=$((SECONDS - START))
 echo ""
 echo "========================================"
@@ -458,9 +611,26 @@ log "$NDONE of $TOTAL tar balls uploaded and verified, run time $((ELAPSED / 360
 if [ $RAW_BYTES -gt 0 ] && [ $ELAPSED -gt 0 ]; then
     log "Packed $(awk -v r="$RAW_BYTES" -v s="$PACKED_BYTES" 'BEGIN {printf "%.1f GB into %.1f GB (%.1fx)", r / 1e9, s / 1e9, r / s}') in this run, $((RAW_BYTES / ELAPSED / 1000000)) MB/s end to end"
 fi
-if [ -f "$STATE/FAILED" ] || [ "$NDONE" -ne "$TOTAL" ]; then
-    [ -f "$STATE/FAILED" ] && cat "$STATE/FAILED"
+if [ -f "$STATE/FAILED" ]; then
+    cat "$STATE/FAILED"
     log "Archive INCOMPLETE. Fix the problem and resubmit the same command to resume."
+    exit 1
+fi
+if [ "$NDONE" -ne "$TOTAL" ]; then
+    if $STOPPED_FOR_TIME && $RESUBMIT && [ "$NDONE" -gt "$DONE_AT_START" ]; then
+        account=$(sed -n 's/.* Account=\([^ ]*\).*/\1/p' <<<"$JOB_INFO")
+        partition=$(sed -n 's/.* Partition=\([^ ]*\).*/\1/p' <<<"$JOB_INFO")
+        timelimit=$(sed -n 's/.* TimeLimit=\([^ ]*\).*/\1/p' <<<"$JOB_INFO")
+        stdout=$(sed -n 's/^ *StdOut=\(.*\)$/\1/p' <<<"$JOB_INFO")
+        out=$(sbatch --parsable --dependency=afterany:"$SLURM_JOB_ID" \
+                --account="$account" --partition="$partition" --time="$timelimit" \
+                --output="$(dirname "$stdout")/archive_%j.log" \
+                "$TOOL/archive.sh" "${ORIG_ARGS[@]}" 2>&1) \
+            || die "Could not resubmit: $out. Resubmit the same command to resume."
+        log "$((TOTAL - NDONE)) tar balls left, continuing in job $out"
+        exit 0
+    fi
+    log "Archive INCOMPLETE. Resubmit the same command to resume."
     exit 1
 fi
 
@@ -474,16 +644,15 @@ log "Writing INDEX.txt and ${NAME}_meta.tar ..."
     echo "archived to: $DEST"
     echo "date: $(date)"
     echo "---"
-    for lst in "${LISTS[@]}"; do
-        n=$(basename "$lst" .lst)
-        awk -v t="$n$EXT" '{print $0 " -> " t}' "$STATE/idx/$n.idx"
+    for n in "${TARS[@]}"; do
+        awk -v t="$n${EXT_OF[$n]}" '{print $0 " -> " t}' "$STATE/idx/$n.idx"
     done
 } > "$STATE/INDEX.txt"
 tar -C "$STATE" -cf "$STAGING/${NAME}_meta.tar" config plan.log plan idx manifest md5 compare logs INDEX.txt \
     || die "Could not create ${NAME}_meta.tar"
 
 for f in "$STATE/INDEX.txt" "$STAGING/${NAME}_meta.tar"; do
-    upload_file "$f" > "$STATE/logs/$(basename "$f").log" 2>&1 \
+    upload_file "$f" "$DEST" > "$STATE/logs/$(basename "$f").log" 2>&1 \
         || die "Upload of $f failed, see $STATE/logs/$(basename "$f").log"
     l=$(md5sum "$f" | cut -d' ' -f1)
     r=$(remote_md5 "$DEST/$(basename "$f")")

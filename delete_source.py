@@ -19,7 +19,7 @@ import stat
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 ENC = dict(encoding='utf-8', errors='surrogateescape')
 
@@ -49,20 +49,44 @@ def atlas_ls(path):
 
 
 def archive_flags(dest, names):
-    """Return the ScoutAM flags (e.g. 'ao--v') of the named files in dest.
+    """Return the ScoutAM flags (e.g. 'ao--v') of the named files below dest.
 
-    One listing of dest covers all files. Each atlas process starts dozens of
-    threads, so running one per file in parallel hits the login node's limit.
+    Names may include a folder (oifs/x.tar). One listing per folder covers all
+    files. Each atlas process starts dozens of threads, so running one per
+    file in parallel hits the login node's limit.
     """
-    listing = atlas_ls(dest + '/')
-    if not listing.get('summary', {}).get('has_more'):
-        flags = {e['name']: e.get('flags', '') for e in listing.get('entries', [])}
-        return [flags.get(n, '') for n in names]
+    flags = {}
+    for folder in sorted(set(os.path.dirname(n) for n in names)):
+        path = dest + '/' + folder if folder else dest
+        listing = atlas_ls(path + '/')
+        if listing.get('summary', {}).get('has_more'):
+            continue
+        for e in listing.get('entries', []):
+            flags[os.path.join(folder, e['name'])] = e.get('flags', '')
     result = []
     for n in names:
-        entries = atlas_ls(dest + '/' + n).get('entries', [])
-        result.append(entries[0].get('flags', '') if entries else '')
+        if n not in flags:
+            entries = atlas_ls(dest + '/' + n).get('entries', [])
+            flags[n] = entries[0].get('flags', '') if entries else ''
+        result.append(flags[n])
     return result
+
+
+def planned_tars(state, name, cfg):
+    """Return (tar name, file name in the archive) for every planned tar ball."""
+    plan = os.path.join(state, 'plan')
+    tsv = os.path.join(plan, 'tars.tsv')
+    if os.path.exists(tsv):
+        result = []
+        with open(tsv, **ENC) as f:
+            for line in f:
+                t, compress = line.rstrip('\n').split('\t')[:2]
+                result.append((t, t + ('.zst' if compress == 'zstd' else '')))
+        return result
+    # State directories written before plan/tars.tsv existed
+    ext = '.zst' if cfg.get('COMPRESS') == 'zstd' else ''
+    return [(t, t + ext) for t in sorted(f[:-len('.lst')] for f in os.listdir(plan)
+                                         if f.startswith(name + '_') and f.endswith('.tar.lst'))]
 
 
 def show(title, paths, limit=20):
@@ -101,12 +125,14 @@ def list_dir(path):
 def walk_parallel(pool, top):
     """Return all non-directory paths and all directories below top."""
     files, dirs = [], []
-    pending = [pool.submit(list_dir, top)]
+    pending = {pool.submit(list_dir, top)}
     while pending:
-        f, d = pending.pop().result()
-        files.extend(f)
-        dirs.extend(d)
-        pending.extend(pool.submit(list_dir, p) for p in d)
+        finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+        for fut in finished:
+            f, d = fut.result()
+            files.extend(f)
+            dirs.extend(d)
+            pending.update(pool.submit(list_dir, p) for p in d)
     return files, dirs
 
 
@@ -131,16 +157,14 @@ def main():
     state = os.path.abspath(args.state)
     cfg = read_config(state)
     source, dest, name = cfg['SOURCE'], cfg['DEST'], cfg['NAME']
-    ext = '.zst' if cfg.get('COMPRESS') == 'zstd' else ''
     print('Source:  ' + source)
     print('Archive: ' + dest)
 
     if not os.path.exists(os.path.join(state, 'ALL_OK')):
         die('archive.sh did not finish with all checks passed (no ALL_OK in %s)' % state)
 
-    plan = os.path.join(state, 'plan')
-    tars = sorted(f[:-len('.lst')] for f in os.listdir(plan)
-                  if f.startswith(name + '_') and f.endswith('.tar.lst'))
+    planned = planned_tars(state, name, cfg)
+    tars = [t for t, _ in planned]
     if not tars:
         die('no tar balls in the plan')
     unchecked = [t for t in tars if not (
@@ -158,8 +182,9 @@ def main():
         print('Skipping the tape check (--no-tape-check)')
     else:
         print('Checking that every tar ball is written to tape ...')
-        flags = archive_flags(dest, [t + ext for t in tars])
-        not_on_tape = [t + ext for t, fl in zip(tars, flags) if not fl.startswith('a')]
+        files = [f for _, f in planned]
+        flags = archive_flags(dest, files)
+        not_on_tape = [f for f, fl in zip(files, flags) if not fl.startswith('a')]
         if not_on_tape:
             show('Tar balls not yet written to tape (flag a)', not_on_tape)
             die('try again later, the archive writes to tape in the background')
